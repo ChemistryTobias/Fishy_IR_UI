@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light">
+<title>fishy_ir · FTIR · MPI-FKF</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23006C66'/%3E%3Cpath d='M4 9 H9 L12 22 L15 12 L18 18 L21 7 L24 16 H28' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='miter'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="top">
+  <div class="identity">
+    <a class="wordmark" href="./" title="Max Planck Institute for Solid State Research">
+      <span>Max Planck Institute</span>
+      <span>for Solid State Research</span>
+    </a>
+    <span class="id-rule" aria-hidden="true"></span>
+    <div class="product">
+      <span class="product-name">fishy_ir</span>
+      <span class="product-sub">FTIR measurement service · Thermo Fisher OMNIC</span>
+    </div>
+  </div>
+  <button id="btn-settings" class="hbtn" title="Instrument, service and API settings">
+    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 5h14v2H3zM3 9h14v2H3zM3 13h14v2H3z"/></svg>
+    Settings
+  </button>
+</header>
+
+<main>
+
+  <!-- =========================================================== STATUS -->
+  <section class="hero" id="hero" data-state="offline">
+    <div class="hero-main">
+      <span class="hero-k">Current status</span>
+      <span class="hero-v" id="hs-state">Connecting…</span>
+      <p class="hero-sub" id="hs-sub">Waiting for the fishy_ir service.</p>
+      <ol class="phases mini" id="hs-phases" hidden>
+        <li data-phase="connecting"><span>Connecting</span></li>
+        <li data-phase="collecting"><span>Collecting</span></li>
+        <li data-phase="processing"><span>Processing</span></li>
+        <li data-phase="pushing"><span>Pushing</span></li>
+      </ol>
+      <div class="hero-actions">
+        <button id="btn-follow" class="primary" hidden>Follow measurement</button>
+        <button id="btn-stop" class="danger" hidden>Stop</button>
+        <button id="btn-err-open" class="secondary" hidden>Show details</button>
+        <button id="btn-err-dismiss" class="tertiary" hidden>Dismiss</button>
+      </div>
+    </div>
+    <div class="hero-facts">
+      <div class="fact" id="hf-bg">
+        <span class="fact-k">Background</span>
+        <span class="fact-v" id="hs-bg">—</span>
+        <span class="fact-s" id="hs-bg-sub">—</span>
+        <button id="btn-bg" class="secondary rowbtn" hidden>Measure background now</button>
+      </div>
+      <div class="fact">
+        <span class="fact-k">Instrument</span>
+        <span class="fact-v" id="hs-inst">—</span>
+        <span class="fact-s" id="hs-inst-sub">—</span>
+      </div>
+      <div class="fact">
+        <span class="fact-k">In queue</span>
+        <span class="fact-v" id="hs-queue">0</span>
+        <span class="fact-s">waiting to start</span>
+      </div>
+    </div>
+    <div class="hero-warn" id="hs-warn" hidden role="alert"></div>
+  </section>
+
+  <!-- ============================================================ QUEUE -->
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2>Measurement queue</h2>
+        <p class="hint">Running and not yet started · one measurement at a time · click a row to open it</p>
+      </div>
+      <button id="btn-new" class="primary">+ New measurement</button>
+    </div>
+    <table id="queue-table">
+      <thead><tr>
+        <th style="width:130px">Status</th><th>Name</th><th style="width:110px">Kind</th>
+        <th>Parameters</th><th style="width:150px">Output</th><th style="width:90px">Added</th><th class="r" style="width:150px"></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="queue-empty" hidden>
+      <span class="empty-mark" aria-hidden="true"></span>
+      <p><b>Nothing queued.</b><br>Create a measurement with <i>New measurement</i>, or from any client via <code>POST /api/jobs</code>.</p>
+    </div>
+  </section>
+
+  <!-- ===================================================== RECENT (bar) -->
+  <button class="recent-bar" id="btn-recent">
+    <span class="rb-k">Recent activity</span>
+    <span class="rb-list" id="rb-list">—</span>
+    <span class="rb-go">Show all <span aria-hidden="true">→</span></span>
+  </button>
+
+</main>
+
+<footer class="foot">
+  <span>Max Planck Institute for Solid State Research · Stuttgart</span>
+  <span><span id="rail-dot" class="dot"></span> <span id="rail-ver">offline</span> · one session, one measurement at a time</span>
+</footer>
+
+<!-- =================================================== SLIDE-IN PANEL -->
+<div id="scrim" hidden></div>
+<aside id="panel" aria-hidden="true" aria-labelledby="pn-title" role="dialog">
+  <div class="panel-head">
+    <button id="pn-back" class="backbtn"><span aria-hidden="true">←</span> <span id="pn-back-l">Back</span></button>
+    <div class="pn-titles">
+      <h2 id="pn-title">—</h2>
+      <span class="hint" id="pn-sub"></span>
+    </div>
+  </div>
+
+  <div class="panel-body">
+
+    <!-- ---------------------------------------------- new / edit job -->
+    <section data-pv="form" hidden>
+      <div class="seg" role="radiogroup" aria-label="Kind">
+        <label><input type="radio" name="f-kind" value="sample" checked><span>Sample</span></label>
+        <label><input type="radio" name="f-kind" value="background"><span>Background only</span></label>
+      </div>
+      <p class="hint" id="f-kind-hint">Full round: automatic background check, then sample.</p>
+
+      <h3>Measurement</h3>
+      <div class="form-grid g4" id="job-form">
+        <label class="span4"><span class="lt">Name</span>
+          <input id="f-name" type="text" placeholder="e.g. KBr pellet #12" spellcheck="false" autocomplete="off">
+        </label>
+        <label><span class="lt">Scans</span>
+          <input id="f-scans" type="number" value="10" min="1" max="2000">
+        </label>
+        <label><span class="lt">Resolution <em>cm⁻¹</em></span>
+          <input id="f-res" type="number" value="4" step="any" min="0.25" max="64">
+        </label>
+        <label><span class="lt">Start <em>cm⁻¹</em></span>
+          <input id="f-start" type="number" value="400" min="1" max="20000">
+        </label>
+        <label><span class="lt">End <em>cm⁻¹</em></span>
+          <input id="f-end" type="number" value="4000" min="1" max="20000">
+        </label>
+        <label class="span2"><span class="lt">Detector</span>
+          <select id="f-det">
+            <option value="TGSA" selected>TGSA</option><option>TGSB</option><option>TGSC</option>
+            <option>TGSD</option><option>MCTA</option><option>PBS</option><option>GE</option>
+          </select>
+        </label>
+      </div>
+
+      <h3>Metadata <span class="tag">optional</span> <span class="fmt" id="f-meta-fmt"></span></h3>
+      <textarea id="f-meta" class="code-in" rows="8" spellcheck="false"
+        placeholder="# YAML or JSON — stays with the measurement
+sample:
+  material: PMMA
+  thickness_um: 50
+operator: TT
+lot: 2026-114"></textarea>
+      <p class="msg" id="f-meta-msg"></p>
+
+      <h3>Output <span class="tag">optional</span></h3>
+      <div class="form-grid g4">
+        <label class="span4"><span class="lt">Save to <em>file path on the instrument PC</em></span>
+          <input id="f-path" type="text" class="mono-in" placeholder="D:\data\ftir\2026\pmma\" spellcheck="false" autocomplete="off">
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="f-push-on"><span>Also send the result to an API endpoint</span></label>
+      <div class="form-grid g4" id="f-push" hidden>
+        <label style="grid-column: span 1"><span class="lt">Method</span>
+          <select id="f-push-method"><option>POST</option><option>PUT</option><option>PATCH</option></select>
+        </label>
+        <label class="span3"><span class="lt">Endpoint URL</span>
+          <input id="f-push-url" type="url" class="mono-in" placeholder="https://eln.example.org/api/v1/ftir" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="span4"><span class="lt">Headers <em>one per line · <code>Name: value</code> · or a JSON object</em></span>
+          <textarea id="f-push-headers" class="code-in" rows="4" spellcheck="false" placeholder="Authorization: Bearer &lt;token&gt;
+X-Project: solid-state-ftir"></textarea>
+        </label>
+      </div>
+      <p class="msg" id="f-push-msg"></p>
+
+      <div class="note" id="f-note">
+        <b>Needs a service update.</b> Metadata and output settings are stored with the job (inside its
+        <code>notes</code>) so nothing is lost, but the current service does not yet save to a custom path or call a
+        custom endpoint — the required API additions are listed in <code>BACKEND_REQUESTS.md</code> of the handoff.
+        Header values are readable by anyone with API access to the job list.
+      </div>
+
+      <div class="panel-foot">
+        <span id="f-msg" class="msg" role="status"></span>
+        <button id="f-del" class="tertiary danger-t" hidden>Delete</button>
+        <button id="f-add" class="secondary">Add to queue</button>
+        <button id="f-addstart" class="primary">Add &amp; start</button>
+        <button id="f-save" class="secondary" hidden>Save changes</button>
+        <button id="f-savestart" class="primary" hidden>Save &amp; start</button>
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------- live follow -->
+    <section data-pv="live" hidden>
+      <div class="live-hero">
+        <div>
+          <span id="lv-state" class="live-state running">Measuring</span>
+          <p id="lv-job" class="live-job">—</p>
+        </div>
+        <button id="lv-stop" class="danger">Stop measurement</button>
+        <button id="lv-result" class="primary" hidden>Open result</button>
+      </div>
+      <ol class="phases" id="lv-phases">
+        <li data-phase="connecting"><span>Connecting</span></li>
+        <li data-phase="collecting"><span>Collecting</span></li>
+        <li data-phase="processing"><span>Processing</span></li>
+        <li data-phase="pushing"><span>Pushing</span></li>
+      </ol>
+      <dl class="kv">
+        <dt>Phase</dt><dd id="lv-phase">—</dd>
+        <dt>Phase time</dt><dd id="lv-elapsed">—</dd>
+        <dt>Started</dt><dd id="lv-started">—</dd>
+        <dt>Parameters</dt><dd id="lv-params">—</dd>
+        <dt>Instrument</dt><dd id="lv-engine">—</dd>
+        <dt>Background</dt><dd id="lv-bg">—</dd>
+      </dl>
+      <div id="lv-meta"></div>
+      <div class="panel-foot">
+        <span class="msg" id="lv-msg"></span>
+        <button id="lv-recent" class="secondary">Recent measurements</button>
+      </div>
+    </section>
+
+    <!-- -------------------------------------------------------- recent -->
+    <section data-pv="recent" hidden>
+      <div class="seg compact" role="radiogroup" aria-label="Filter">
+        <label><input type="radio" name="rc-f" value="all" checked><span>All</span></label>
+        <label><input type="radio" name="rc-f" value="sample"><span>Samples</span></label>
+        <label><input type="radio" name="rc-f" value="background"><span>Backgrounds</span></label>
+        <label><input type="radio" name="rc-f" value="problem"><span>Failed / aborted</span></label>
+      </div>
+      <table id="rc-table">
+        <thead><tr><th style="width:130px">Status</th><th>Name</th><th style="width:110px">Kind</th><th style="width:150px">Finished</th><th class="n" style="width:70px">Peaks</th><th style="width:90px">Push</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="rc-empty" hidden>
+        <span class="empty-mark" aria-hidden="true"></span>
+        <p><b>No measurements here yet.</b><br>Finished, failed and aborted measurements appear in this list.</p>
+      </div>
+      <p class="hint" id="rc-dir"></p>
+    </section>
+
+    <!-- -------------------------------------------------------- result -->
+    <section data-pv="result" hidden>
+      <p id="rd-err" class="msg err"></p>
+      <div class="chips" id="rd-chips"></div>
+      <div class="plot" id="rd-plot">
+        <canvas id="rd-canvas" aria-label="IR spectrum"></canvas>
+        <div class="plot-read" id="rd-read" hidden></div>
+      </div>
+      <div id="rd-meta"></div>
+      <div class="panel-foot">
+        <span class="msg"></span>
+        <a id="rd-xml" class="button secondary" target="_blank" rel="noopener">Raw XML</a>
+        <a id="rd-csv" class="button primary" target="_blank" rel="noopener">Download CSV</a>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------ settings -->
+    <section data-pv="settings" hidden>
+      <div class="seg compact" role="tablist" aria-label="Settings">
+        <label><input type="radio" name="st-tab" value="instrument" checked><span>Instrument</span></label>
+        <label><input type="radio" name="st-tab" value="service"><span>Service</span></label>
+        <label><input type="radio" name="st-tab" value="api"><span>API</span></label>
+      </div>
+
+      <div data-st="instrument">
+        <div class="row-head">
+          <h3 class="flush">Instrument</h3>
+          <button id="btn-st-refresh" class="tertiary">Refresh</button>
+        </div>
+        <dl class="kv">
+          <dt>Ready-state</dt><dd id="st-ready">probing…</dd>
+          <dt>Instrument time</dt><dd id="st-time">—</dd>
+          <dt>Session</dt><dd id="st-session">—</dd>
+          <dt>Background rule</dt><dd id="st-bgrule">—</dd>
+        </dl>
+        <h3>Engine settings <span class="tag">read-only</span></h3>
+        <div class="inline-form">
+          <label><span class="lt">Detector</span>
+            <select id="opt-det">
+              <option selected>TGSA</option><option>TGSB</option><option>TGSC</option>
+              <option>TGSD</option><option>MCTA</option><option>PBS</option><option>GE</option>
+            </select>
+          </label>
+          <button id="btn-opt" class="secondary">Optimal velocity</button>
+        </div>
+        <dl class="kv" id="opt-out" hidden></dl>
+        <p id="opt-msg" class="msg"></p>
+        <details id="con-details">
+          <summary>Constraints snapshot <span class="hint">factory baseline</span></summary>
+          <div id="con-out" class="detail-body"><p class="msg">loading…</p></div>
+        </details>
+        <details id="xml-details">
+          <summary>Instrument XML <span class="hint">driver config</span></summary>
+          <div id="xml-out" class="detail-body"><p class="msg">loading…</p></div>
+        </details>
+      </div>
+
+      <div data-st="service" hidden>
+        <h3 class="flush">Service</h3>
+        <dl class="kv">
+          <dt>Version</dt><dd id="sv-ver">—</dd>
+          <dt>Uptime</dt><dd id="sv-uptime">—</dd>
+          <dt>Token</dt><dd id="sv-token">—</dd>
+          <dt>Results dir</dt><dd id="sv-dir">—</dd>
+          <dt>Default push</dt><dd>configured in the service config (<code>push.url</code>)</dd>
+          <dt>API base</dt><dd id="sv-base">same origin</dd>
+        </dl>
+        <div class="actions">
+          <button id="btn-push-test" class="secondary">Test push</button>
+          <button id="btn-token" class="tertiary">Set token…</button>
+        </div>
+        <p id="push-msg" class="msg"></p>
+      </div>
+
+      <div data-st="api" hidden>
+        <h3 class="flush">REST API</h3>
+        <p class="lead" id="api-auth">auth: —</p>
+        <p class="lead">Machine-readable contract: <a id="api-openapi" href="openapi.yaml" target="_blank" rel="noopener"><code>/openapi.yaml</code></a></p>
+<pre class="code">curl -s -X POST http://HOST:8385/api/jobs \
+     -H 'Content-Type: application/json' \
+     -H 'X-Fishy-Token: &lt;token&gt;' \
+     -d '{"name":"pellet-01","kind":"sample",
+          "params":{"scans":10,"resolution":4}}'</pre>
+        <h3>Endpoints <span class="hint" id="api-src"></span></h3>
+        <table id="api-table"><thead><tr><th style="width:90px">Method</th><th>Path</th><th>Description</th></tr></thead><tbody></tbody></table>
+        <p class="msg" id="api-empty" hidden>Service not reachable — the list is read live from <code>GET /api/docs</code>.</p>
+        <p class="lead small">Aliases: scans → numberOFSans · resolution · start / end → (start|end)Frequency (cm⁻¹) ·
+          velocity → opticalVelocity (cm/s) · detector <code>TGSA</code> etc. · unknown keys pass through to the engine.</p>
+      </div>
+    </section>
+
+  </div>
+</aside>
+
+<!-- ------------------------------------------------------------ dialogs -->
+<dialog id="dlg-confirm" class="dlg">
+  <form method="dialog">
+    <h2 id="dc-title">Confirm</h2>
+    <p id="dc-body" class="lead"></p>
+    <div class="actions right">
+      <button value="cancel" class="secondary">Cancel</button>
+      <button value="ok" id="dc-ok" class="primary">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-token" class="dlg">
+  <form method="dialog">
+    <h2>Access token</h2>
+    <p class="lead">This service is reachable on the network and needs a token for <code>/api/*</code>.
+      It is printed in the service console at start-up and stored in <code>config/fishy_ir.token</code>.</p>
+    <label><span class="lt">Token</span>
+      <input id="tk-input" type="password" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint">Stored in this browser only (<code>localStorage</code>).</p>
+    <div class="actions right">
+      <button value="cancel" class="secondary" formnovalidate>Cancel</button>
+      <button value="ok" class="primary">Save token</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
