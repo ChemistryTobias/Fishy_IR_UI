@@ -89,9 +89,23 @@ your remote dev loop (see API.md §1.3).
 ## Design (MPI-FKF)
 
 The UI follows `DESIGN.md` (Max Planck corporate design adapted for screens):
-MPG green header with a text wordmark top-left (no Minerva), Roboto (embedded
-in `style.css` as base64 — self-hosted, no Google CDN, works air-gapped),
-flat 2px-radius buttons with uppercase tracked labels, accent colours only at
-small scale (status chips, chart peaks), blue-light keyboard focus ring.
-The spectrum plot uses the IR convention (wavenumber high → low) with a hover
-read-out. All tokens are CSS variables at the top of `style.css`.
+MPG green header with a text wordmark top-left (no Minerva), Roboto embedded
+in `style.css` (self-hosted, no Google CDN, works air-gapped), flat 2px-radius
+buttons with uppercase tracked labels, accent colours only at small scale.
+Desktop only (min. width 1200 px). All tokens are CSS variables at the top of
+`style.css`.
+
+**Layout:** one main page and one slide-in panel.
+
+* **Main page:** current status (Running / Stopping / Idle / Error / Offline,
+  background freshness, instrument, queue size), the queue (running and
+  not-yet-started jobs only), *New measurement*, and a *Recent activity* bar.
+* **Panel** (slides in from the right; *Back* steps back, Esc too):
+  new / queued measurement form (editable until it starts) · follow the
+  running measurement · recent activity (finished, failed, aborted, including
+  backgrounds) · result with spectrum · settings (instrument, service, API).
+
+**Metadata & output:** the form takes optional YAML/JSON metadata, a save-to
+path and an API endpoint with headers. These are **not in the API contract
+yet**. See `BACKEND_REQUESTS.md` for what the service needs to add. Until
+then they are kept in the job's `notes`.
