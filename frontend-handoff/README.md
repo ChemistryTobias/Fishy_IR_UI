@@ -21,7 +21,7 @@ frontend-handoff/
 ├── openapi.yaml         ← machine-readable version of the same contract
 ├── serve.bat / serve.sh ← serve ui/ statically for local dev (port 8400)
 └── ui/
-    ├── index.html       ← DOM (hero + 5 views + footer)
+    ├── index.html       ← DOM (status · queue · recent bar + slide-in panel)
     ├── app.js           ← client (vanilla JS, no deps, no build step)
     └── style.css        ← theme (design tokens = CSS vars at the top)
 ```
@@ -57,7 +57,8 @@ prompt handles auth).
   air-gapped Windows PC from plain files.
 * All fetches through `API.req(path[, opts])` — token, JSON, toast errors.
 * 409/`busy` must be in-band (highlight the running job), never a global alert.
-* Header/footer text requests are listed in `KNOWN_ISSUES.md` — styling-only.
+* Header/footer text requests from `KNOWN_ISSUES.md` (#3–#5) are done; #6 is
+  done for browser-side settings, service settings need `BACKEND_REQUESTS.md` §7.
 
 ## Copying fixes to the instrument PC
 

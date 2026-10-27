@@ -68,6 +68,62 @@ function setMsg(el, text, cls) {
   el.textContent = text || "";
 }
 function jobTime(j) { return j.finished || j.started || j.created || j.createdAt || ""; }
+function jobReason(j) { return (j && (j.reason || j.error)) || ""; }   // v0.2.0: `reason`; older builds: `error`
+
+/* ------------------------------------------------- queue endpoints
+ * API.md v0.2.0 lists/enqueues via /api/queue; openapi.yaml and older builds
+ * use /api/jobs. Try the documented one first and remember what answered. */
+const Q = { list: "/api/queue", add: "/api/queue" };
+async function listJobs() {
+  try { const r = await API.req(Q.list); return r.queue || r.jobs || []; }
+  catch (e) {
+    if (e.status === 404 && Q.list === "/api/queue") { Q.list = "/api/jobs?limit=200"; return listJobs(); }
+    throw e;
+  }
+}
+async function enqueue(body) {
+  try { return await API.req(Q.add, { method: "POST", body: JSON.stringify(body) }); }
+  catch (e) {
+    if ((e.status === 404 || e.status === 405) && Q.add === "/api/queue") { Q.add = "/api/jobs"; return enqueue(body); }
+    throw e;
+  }
+}
+async function startJob(id) {   // in openapi.yaml, not (yet) in API.md — see BACKEND_REQUESTS.md §6
+  try { return await API.req(`/api/jobs/${id}/start`, { method: "POST" }); }
+  catch (e) {
+    if (e.status === 404 || e.status === 405) {
+      e.message = "This service version cannot start a queued measurement (POST /api/jobs/<id>/start is missing). " +
+                  "Delete it and use “Add & start”, or ask for the endpoint (BACKEND_REQUESTS.md §6).";
+    }
+    throw e;
+  }
+}
+function runningId() {   // /health no longer reports `current` in v0.2.0
+  const h = LAST_HEALTH;
+  if (h && h.current) return h.current;
+  const j = JOBS.find(x => x.status === "running");
+  return j ? j.id : null;
+}
+
+/* ------------------------------------------- browser-side settings
+ * What the operator can configure without a service change: the service
+ * address, the header instrument name and defaults for new measurements.
+ * Kept in localStorage (headers are never stored). */
+const BUILTIN = { scans: 10, res: 4, start: 4000, end: 600, det: "TGSA", bgmode: "", path: "", pushUrl: "", pushMethod: "POST" };
+const DETECTORS = ["TGSA", "TGSB", "TGSC", "TGSD", "MCTA", "MCTB", "PBSE", "INGAAS", "INSB", "SI", "PBS", "GE", "HIGHDCT", "HIGHDMCT"];
+const INSTRUMENT_DEFAULT = "Thermo Fisher · Nicolet Summit X";
+function defaults() {
+  let d = {};
+  try { d = JSON.parse(store.get("fishyDefaults") || "{}") || {}; } catch (e) { /* corrupt → built-ins */ }
+  return Object.assign({}, BUILTIN, d);
+}
+function instrumentName() { return store.get("fishyInstrument") || INSTRUMENT_DEFAULT; }
+$$("select[data-detectors]").forEach(sel => {
+  const keep = sel.value;
+  sel.innerHTML = DETECTORS.map(c => `<option>${c}</option>`).join("");
+  sel.value = keep || "TGSA";
+});
+$("#hdr-instrument").textContent = instrumentName();
 
 /* ---------------------------------------------------------------- toasts */
 function toast(msg, kind) {
@@ -314,21 +370,26 @@ function parseHeaders(text) {
 }
 
 /* --------------------------------------------------- job extras
- * Metadata + per-job output (save path, API push) are not in the API
- * contract yet — see ../BACKEND_REQUESTS.md for what the service must add.
- *   FEATURES.jobExtras = false (default, works with today's service):
- *     they travel inside the job's free-text `notes` as a small JSON envelope,
- *     so they at least stay with the measurement.
- *   FEATURES.jobExtras = true (once the service implements the request):
- *     they are sent as first-class `metadata` / `output` fields.
- * Reading always prefers first-class fields and falls back to the envelope. */
-const FEATURES = { jobExtras: false };   // switched on automatically when /health lists "job.extras"
+ * Since service v0.2.0 `metadata` and `output` are first-class job fields.
+ * Jobs created by earlier UI builds carried them inside `notes` as a small
+ * JSON envelope; reading still understands that, writing no longer uses it
+ * (set FEATURES.jobExtras = false only for a pre-0.2.0 service). */
+const FEATURES = { jobExtras: true };
+/* output.push is an object {url, method, headers} in openapi.yaml but a
+ * plain URL string in API.md §4.2 — accept both when reading. */
+function pushOf(o) {
+  const p = o && o.push;
+  if (!p) return null;
+  if (typeof p === "string") return { url: p, method: "POST", headers: {} };
+  return { url: p.url || "", method: p.method || "POST", headers: p.headers || {} };
+}
 const ENVELOPE = "fishy_ui";
 function jobExtras(j) {
+  const status = (j && j.output_status) || null;
   if (j && (j.metadata || j.output)) {
-    return { metadata: j.metadata || null, metadataText: j.metadata ? toYAML(j.metadata) : "", output: j.output || null };
+    return { metadata: j.metadata || null, metadataText: j.metadata ? toYAML(j.metadata) : "", output: j.output || null, status };
   }
-  return decodeNotes(j && j.notes);
+  return Object.assign(decodeNotes(j && j.notes), { status });
 }
 function extrasPayload(extras) {
   if (FEATURES.jobExtras) return { metadata: extras.metadata || null, output: extras.output || null };
@@ -367,7 +428,7 @@ function metaSummary(meta) {
 
 /* ====================================================== slide-in panel */
 let STACK = [];               // [{ view, id?, title, sub }]
-let FORM_DIRTY = false;
+let FORM_DIRTY = false, OUTPUT_DIRTY = false;
 const scrim = $("#scrim"), panel = $("#panel");
 
 function openPanel(entry, reset) {
@@ -409,7 +470,7 @@ function renderPanel() {
   if (e.view === "live") { setPanelTitle("Current measurement", shortId(e.id)); refreshLive(); }
   if (e.view === "recent") { setPanelTitle("Recent activity", "finished, failed and aborted measurements"); refreshRecent(); }
   if (e.view === "result") { setPanelTitle("Measurement", shortId(e.id)); openResult(e.id); }
-  if (e.view === "settings") { setPanelTitle("Settings", "instrument · service · API"); showSettingsTab(); }
+  if (e.view === "settings") { setPanelTitle("Settings", "instrument · connection & defaults · API"); showSettingsTab(); }
   setTimeout(() => { const b = $("#pn-back"); if (document.activeElement === document.body) b.focus(); }, 50);
 }
 $("#pn-back").onclick = panelBack;
@@ -428,7 +489,7 @@ function openJob(j) {
 $("#btn-new").onclick = () => openPanel({ view: "form" }, true);
 $("#btn-recent").onclick = () => openPanel({ view: "recent" }, true);
 $("#btn-settings").onclick = () => openPanel({ view: "settings" }, true);
-$("#btn-follow").onclick = () => { if (LAST_HEALTH && LAST_HEALTH.current) openPanel({ view: "live", id: LAST_HEALTH.current }, true); };
+$("#btn-follow").onclick = () => { const id = runningId(); if (id) openPanel({ view: "live", id }, true); };
 $("#lv-recent").onclick = () => openPanel({ view: "recent" });
 
 /* =========================================================== main page */
@@ -436,7 +497,7 @@ let LAST_HEALTH = null, JOBS = [], INST = null, INST_ERR = null, INST_AT = 0, ST
 let HIGHLIGHT = null;
 const DISMISSED_KEY = "fishyDismissedFailure";
 
-const PHASES = ["connecting", "collecting", "processing", "pushing"];
+const PHASES = ["collecting", "decoding", "pushing"];
 function paintPhases(list, busy, phase) {
   const idx = PHASES.indexOf(phase);
   $$(list + " li").forEach((li, i) => { li.className = !busy ? "" : i < idx ? "done" : i === idx ? "now" : ""; });
@@ -453,22 +514,25 @@ function renderHero() {
   let state, title, sub = "";
   const failed = lastCompleted();
   const failure = failed && failed.status === "failed" && store.get(DISMISSED_KEY) !== failed.id ? failed : null;
+  const engineFail = h && h.failure && store.get(DISMISSED_KEY) !== "engine:" + h.failure ? h.failure : null;
   if (!h) {
     state = "offline"; title = "Offline";
     sub = "The fishy_ir service is not reachable. The page keeps retrying every few seconds.";
   } else if (h.busy) {
     state = STOPPING ? "stopping" : "running";
     title = STOPPING ? "Stopping" : "Running";
-    const j = JOBS.find(x => x.id === h.current);
+    const rid = runningId(), j = JOBS.find(x => x.id === rid);
     sub = j ? `<b>${esc(j.name) || shortId(j.id)}</b> · ${esc(j.kind)}<span class="mono">${esc(shortId(j.id))}</span>`
-            : `<span class="mono">${esc(shortId(h.current))}</span>`;
+            : `<span class="mono">${esc(shortId(rid))}</span>`;
     sub += ` · ${esc(h.phase || "busy")}`;
   } else if (INST_ERR) {
     state = "error"; title = "Error"; sub = "Instrument not reachable: " + esc(INST_ERR);
   } else if (failure) {
     state = "error"; title = "Error";
     sub = `Last measurement <b>${esc(failure.name) || shortId(failure.id)}</b> failed` +
-          (failure.error ? `: ${esc(failure.error)}` : ".");
+          (jobReason(failure) ? `: ${esc(jobReason(failure))}` : ".");
+  } else if (engineFail) {
+    state = "error"; title = "Error"; sub = "Engine reported: " + esc(engineFail);
   } else {
     state = "idle"; title = "Idle";
     sub = h.connected ? "Ready for the next measurement." : "Ready · the engine connects on the first measurement.";
@@ -481,9 +545,12 @@ function renderHero() {
   show("#btn-follow", h && h.busy);
   show("#btn-stop", h && h.busy && !STOPPING);
   show("#btn-err-open", state === "error" && !!failure && !INST_ERR);
-  show("#btn-err-dismiss", state === "error" && !!failure && !INST_ERR);
+  show("#btn-err-dismiss", state === "error" && !INST_ERR && !!(failure || engineFail));
   $("#btn-err-open").onclick = () => failure && openPanel({ view: "result", id: failure.id }, true);
-  $("#btn-err-dismiss").onclick = () => { if (failure) store.set(DISMISSED_KEY, failure.id); renderHero(); };
+  $("#btn-err-dismiss").onclick = () => {
+    store.set(DISMISSED_KEY, failure ? failure.id : "engine:" + engineFail);
+    renderHero();
+  };
 
   // facts
   const b = h && h.background;
@@ -502,6 +569,7 @@ function renderHero() {
   else if (h.busy) { iv.textContent = "Busy"; iv.className = "fact-v"; $("#hs-inst-sub").textContent = h.phase || "measuring"; }
   else if (INST_ERR) { iv.textContent = "Error"; iv.className = "fact-v is-err"; $("#hs-inst-sub").textContent = INST_ERR; }
   else if (INST && INST.readyState) { iv.textContent = INST.readyState; iv.className = "fact-v is-ok"; $("#hs-inst-sub").textContent = INST.description || (h.connected ? "connected" : ""); }
+  else if (INST && INST.connected) { iv.textContent = "Ready"; iv.className = "fact-v is-ok"; $("#hs-inst-sub").textContent = INST.time ? "instrument time " + String(INST.time).slice(11, 16) : "engine connected"; }
   else { iv.textContent = h.connected ? "Connected" : "Idle"; iv.className = "fact-v" + (h.connected ? " is-ok" : ""); $("#hs-inst-sub").textContent = h.connected ? "engine connected" : "connects on first job"; }
 
   $("#hs-queue").textContent = JOBS.filter(j => j.status === "staged").length;
@@ -527,10 +595,7 @@ async function stopMeasurement() {
 async function startBackgroundJob() {
   try {
     const name = "background-" + stamp();
-    const r = await API.req("/api/jobs", {
-      method: "POST",
-      body: JSON.stringify({ name, kind: "background", params: {}, start_now: true }),
-    });
+    const r = await enqueue({ name, kind: "background", params: {}, start_now: true });
     toast("Background started (" + shortId(r.job.id) + ")");
     await tick();
     openPanel({ view: "live", id: r.job.id }, true);
@@ -552,10 +617,11 @@ function handleBusy(e, msgEl) {
 /* --------------------------------------------------------------- queue */
 function outMarkers(out) {
   if (!out || (!out.path && !out.push)) return `<span class="out"><span class="none">default</span></span>`;
-  return `<span class="out">${out.path ? `<span title="${esc(out.path)}">Path</span>` : ""}${out.push ? `<span title="${esc((out.push.method || "POST") + " " + out.push.url)}">API</span>` : ""}</span>`;
+  const p = pushOf(out);
+  return `<span class="out">${out.path ? `<span title="${esc(out.path)}">Path</span>` : ""}${p ? `<span title="${esc(p.method + " " + p.url)}">API</span>` : ""}</span>`;
 }
 function renderQueue() {
-  const current = LAST_HEALTH && LAST_HEALTH.current;
+  const current = runningId();
   const rows = JOBS.filter(j => j.status === "running" || j.status === "staged")
     .sort((a, b) => (a.status === "running" ? -1 : b.status === "running" ? 1 : 0)
       || String(a.created || a.createdAt || "").localeCompare(String(b.created || b.createdAt || "")));
@@ -587,7 +653,7 @@ $("#queue-table tbody").addEventListener("click", async ev => {
   if (!btn) return openJob(JOBS.find(j => j.id === id));
   try {
     if (btn.dataset.act === "start") {
-      await API.req(`/api/jobs/${id}/start`, { method: "POST" });
+      await startJob(id);
       toast("Started " + shortId(id));
       await tick();
       openPanel({ view: "live", id }, true);
@@ -619,29 +685,34 @@ const F = {
 };
 function kindHint() {
   const bg = F.kind() === "background";
-  $("#f-kind-hint").textContent = bg ? "Background only, on the KBr reference." : "Full round: automatic background check, then sample.";
+  $("#f-kind-hint").textContent = bg ? "Background only, on the KBr reference." : "Sample measurement · choose below whether to collect a fresh background first.";
+  $("#f-bgmode-l").hidden = bg;
   $("#f-name").placeholder = bg ? "e.g. background-morning" : "e.g. KBr pellet #12";
 }
 $$("input[name=f-kind]").forEach(r => r.addEventListener("change", kindHint));
 
 function fillForm(j) {
+  const D = defaults();
   const p = (j && j.params) || {};
   const n = jobExtras(j);
   F.setKind((j && j.kind) || "sample");
   $("#f-name").value = (j && j.name) || "";
-  $("#f-scans").value = p.scans ?? p.numberOfScans ?? 10;
-  $("#f-res").value = p.resolution ?? 4;
-  $("#f-start").value = p.start ?? p.startFrequency ?? 400;
-  $("#f-end").value = p.end ?? p.endFrequency ?? 4000;
-  $("#f-det").value = p.detector || "TGSA";
+  $("#f-scans").value = p.scans ?? p.numberOfScans ?? D.scans;
+  $("#f-res").value = p.resolution ?? D.res;
+  $("#f-start").value = p.start ?? p.startFrequency ?? D.start;
+  $("#f-end").value = p.end ?? p.endFrequency ?? D.end;
+  $("#f-det").value = DETECTORS.includes(p.detector) ? p.detector : (j ? "TGSA" : D.det);
+  $("#f-bgmode").value = j ? (p.background || "") : D.bgmode;
   $("#f-meta").value = n.metadataText || "";
-  const o = n.output || {};
+  const o = n.output || (j ? {} : { path: D.path, push: D.pushUrl ? { url: D.pushUrl, method: D.pushMethod } : null });
+  const push = pushOf(o);
   $("#f-path").value = o.path || "";
-  $("#f-push-on").checked = !!o.push;
-  $("#f-push-method").value = (o.push && o.push.method) || "POST";
-  $("#f-push-url").value = (o.push && o.push.url) || "";
-  $("#f-push-headers").value = o.push && o.push.headers ? Object.entries(o.push.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "";
-  $("#f-push").hidden = !$("#f-push-on").checked;
+  $("#f-push-on").checked = !!push;
+  $("#f-push-method").value = (push && push.method) || "POST";
+  $("#f-push-url").value = (push && push.url) || "";
+  $("#f-push-headers").value = push ? Object.entries(push.headers).map(([k, v]) => `${k}: ${v}`).join("\n") : "";
+  $("#f-push").hidden = !push;
+  $("#f-push-test").hidden = !(j && push);   // test needs the endpoint saved on the job
   checkMeta(); checkPush();
 }
 async function renderForm(e) {
@@ -662,7 +733,7 @@ async function renderForm(e) {
       fillForm(j);
     } catch (err) { setMsg($("#f-msg"), err.message, "err"); }
   }
-  FORM_DIRTY = false;
+  FORM_DIRTY = OUTPUT_DIRTY = false;
   updateBusyHint();
 }
 function updateBusyHint() {
@@ -670,8 +741,20 @@ function updateBusyHint() {
   $("#f-addstart").disabled = $("#f-savestart").disabled = busy;
   $("#f-addstart").title = $("#f-savestart").title = busy ? "Instrument busy — add it to the queue and start it later" : "";
 }
-$("[data-pv=form]").addEventListener("input", () => { FORM_DIRTY = true; });
+$("[data-pv=form]").addEventListener("input", ev => {
+  FORM_DIRTY = true;
+  if (ev.target.closest("#f-output")) OUTPUT_DIRTY = true;
+});
 $("#f-push-on").addEventListener("change", () => { $("#f-push").hidden = !$("#f-push-on").checked; checkPush(); });
+$("#f-push-test").onclick = async () => {
+  const msg = $("#f-push-msg"), id = panelTop().id;
+  if (FORM_DIRTY) return setMsg(msg, "Save your changes first — the test uses the endpoint stored on the job.", "warn");
+  setMsg(msg, "Sending a test payload…");
+  try {
+    const r = await API.req(`/api/jobs/${id}/push/test`, { method: "POST" });
+    setMsg(msg, `Endpoint answered${r.status ? " HTTP " + r.status : ""} · OK`, "ok");
+  } catch (e) { setMsg(msg, "Test failed: " + e.message, "err"); }
+};
 
 function checkMeta() {
   const ta = $("#f-meta"), fmt = $("#f-meta-fmt"), msg = $("#f-meta-msg");
@@ -718,7 +801,7 @@ function collectForm() {
     const el = $(id);
     if (!el.checkValidity() || el.value === "") { el.focus(); throw new Error(el.validationMessage || "Please fill in all parameters."); }
   }
-  if (+$("#f-start").value >= +$("#f-end").value) { $("#f-end").focus(); throw new Error("End must be larger than start (cm⁻¹)."); }
+  if (+$("#f-start").value === +$("#f-end").value) { $("#f-end").focus(); throw new Error("Start and end must differ (cm⁻¹)."); }
   const meta = checkMeta();
   if (!meta) { $("#f-meta").focus(); throw new Error("Fix the metadata first."); }
   const push = checkPush();
@@ -733,6 +816,7 @@ function collectForm() {
       scans: +$("#f-scans").value, resolution: +$("#f-res").value,
       start: +$("#f-start").value, end: +$("#f-end").value,
       detector: $("#f-det").value,
+      ...(F.kind() === "sample" && $("#f-bgmode").value ? { background: $("#f-bgmode").value } : {}),
     },
     ...extrasPayload({ metadata: meta.value, metadataText: $("#f-meta").value.trim(), output }),
   };
@@ -744,7 +828,7 @@ async function submitNew(startNow) {
   try { body = collectForm(); } catch (e) { return setMsg(msg, e.message, "err"); }
   setMsg(msg, startNow ? "Adding and starting…" : "Adding to queue…");
   try {
-    const r = await API.req("/api/jobs", { method: "POST", body: JSON.stringify(Object.assign(body, { start_now: startNow })) });
+    const r = await enqueue(Object.assign(body, { start_now: startNow }));
     FORM_DIRTY = false;
     toast(startNow ? "Measurement started" : "Added to queue");
     await tick();
@@ -757,6 +841,14 @@ async function saveStaged(andStart) {
   const id = panelTop().id, msg = $("#f-msg");
   let body;
   try { body = collectForm(); } catch (e) { return setMsg(msg, e.message, "err"); }
+  /* The service returns push header values as "***". Re-sending them would
+   * overwrite the real secrets, so an untouched output section is left out of
+   * the PATCH, and a touched one must not still contain redacted values. */
+  if (!OUTPUT_DIRTY) delete body.output;
+  else if (body.output && pushOf(body.output) && Object.values(pushOf(body.output).headers).includes("***")) {
+    $("#f-push-headers").focus();
+    return setMsg(msg, "Header values are hidden (***) by the service — re-enter them before saving the endpoint.", "err");
+  }
   setMsg(msg, "Saving…");
   try {
     const j = (await API.req(`/api/jobs/${id}`)).job;
@@ -765,17 +857,17 @@ async function saveStaged(andStart) {
       body: JSON.stringify({
         name: body.name || j.name, kind: body.kind,
         ...(FEATURES.jobExtras ? { metadata: body.metadata, output: body.output } : { notes: body.notes }),
-        params: {
-          ...j.params,
-          scans: body.params.scans, resolution: body.params.resolution,
-          startFrequency: body.params.start, endFrequency: body.params.end,
-          detector: body.params.detector,
-        },
+        params: (() => {
+          const p = Object.assign({}, j.params, body.params);
+          if (!body.params.background) delete p.background;        // back to service default
+          delete p.startFrequency; delete p.endFrequency;           // superseded by start/end (API.md §4.4)
+          return p;
+        })(),
       }),
     });
     FORM_DIRTY = false;
     if (andStart) {
-      await API.req(`/api/jobs/${id}/start`, { method: "POST" });
+      await startJob(id);
       toast("Saved and started");
       await tick();
       openPanel({ view: "live", id }, true);
@@ -806,6 +898,14 @@ $("#f-del").onclick = async () => {
 };
 
 /* ================================================================ live */
+function outputStatusRows(st) {
+  if (!st) return "";
+  const row = (k, v, cls) => `<dt>${k}</dt><dd class="${cls}">${esc(v)}</dd>`;
+  let out = "";
+  if (st.path) out += row("Copy", st.path + (st.pathError ? " · " + st.pathError : ""), st.path === "copied" ? "good" : "bad");
+  if (st.push) out += row("Push", st.push + (st.pushHttpStatus ? " · HTTP " + st.pushHttpStatus : "") + (st.pushError ? " · " + st.pushError : ""), st.push === "sent" ? "good" : "warn");
+  return out;
+}
 function metaBlock(n, el) {
   const parts = [];
   if (n && n.metadata) parts.push(`<h3>Metadata</h3><pre class="meta">${esc(n.metadataText || toYAML(n.metadata))}</pre>`);
@@ -813,8 +913,9 @@ function metaBlock(n, el) {
     const o = n.output;
     parts.push(`<h3>Output</h3><dl class="kv">` +
       (o.path ? `<dt>Save to</dt><dd>${esc(o.path)}</dd>` : "") +
-      (o.push ? `<dt>API endpoint</dt><dd>${esc((o.push.method || "POST") + " " + o.push.url)}</dd>` +
-                `<dt>Headers</dt><dd>${esc(Object.keys(o.push.headers || {}).join(", ") || "—")}</dd>` : "") +
+      (pushOf(o) ? `<dt>API endpoint</dt><dd>${esc(pushOf(o).method + " " + pushOf(o).url)}</dd>` +
+                `<dt>Headers</dt><dd>${esc(Object.keys(pushOf(o).headers).join(", ") || "—")}</dd>` : "") +
+      outputStatusRows(n.status) +
       `</dl>`);
   }
   el.innerHTML = parts.join("");
@@ -835,7 +936,7 @@ async function refreshLive() {
     ? `<b>${esc(j.name) || shortId(j.id)}</b> · ${esc(j.kind)}<span class="mono">${esc(shortId(j.id))}</span>`
     : j.status === "finished" ? "Measurement finished — the result is ready."
     : j.status === "aborted" ? "Stopped on request (aborted)."
-    : esc(j.error || "Measurement failed.");
+    : esc(jobReason(j) || "Measurement failed.");
   $("#lv-stop").hidden = !running || STOPPING;
   $("#lv-result").hidden = running;
   $("#lv-result").onclick = () => openPanel({ view: "result", id: j.id });
@@ -867,7 +968,9 @@ async function refreshRecent() {
     const r = await API.req("/api/finished");
     RECENT = (r.measurements || []).slice().sort((a, b) => (b.finished || "").localeCompare(a.finished || ""));
   } catch (e) { RECENT = []; }
-  if (LAST_HEALTH && LAST_HEALTH.resultsDir) $("#rc-dir").innerHTML = `Files are saved under <code>${esc(LAST_HEALTH.resultsDir)}</code>.`;
+  $("#rc-dir").innerHTML = LAST_HEALTH && LAST_HEALTH.resultsDir
+    ? `Files are saved under <code>${esc(LAST_HEALTH.resultsDir)}</code>.`
+    : `Finished files are copied to <code>measurements\\&lt;id&gt;-&lt;name&gt;\\</code> in the service folder on the instrument PC.`;
   renderRecent();
 }
 function renderRecent() {
@@ -877,11 +980,11 @@ function renderRecent() {
     : m.kind === f);
   $("#rc-table tbody").innerHTML = rows.map(m => `<tr data-id="${esc(m.id)}" class="clickable" tabindex="0">
       <td><span class="tpill ${esc(m.status)}">${esc(m.status)}</span></td>
-      <td class="name">${esc(m.name) || shortId(m.id)}${m.error ? `<small>${esc(m.error)}</small>` : (() => { const s = metaSummary(jobExtras(m).metadata); return s ? `<small>${esc(s)}</small>` : ""; })()}</td>
+      <td class="name">${esc(m.name) || shortId(m.id)}${jobReason(m) ? `<small>${esc(jobReason(m))}</small>` : (() => { const s = metaSummary(jobExtras(m).metadata); return s ? `<small>${esc(s)}</small>` : ""; })()}</td>
       <td>${esc(m.kind)}</td>
       <td class="mono when">${esc(shortDt(m.finished))}</td>
       <td class="n">${esc(m.peaks ?? (m.result && m.result.peaks ? m.result.peaks.length : "—"))}</td>
-      <td>${pushPill(m.push_status)}</td></tr>`).join("");
+      <td>${pushPill(m.push_status || (m.output_status && m.output_status.push))}</td></tr>`).join("");
   $("#rc-table").hidden = !rows.length;
   $("#rc-empty").hidden = !!rows.length;
 }
@@ -908,7 +1011,7 @@ async function openResult(id) {
     const { measurement: m } = await API.req(`/api/finished/${id}?spectrum=1`);
     if (panelTop().view !== "result" || panelTop().id !== id) return;
     setPanelTitle(m.name || ("Measurement " + shortId(id)), [m.kind, m.status, shortDt(m.finished), shortId(m.id)].filter(Boolean).join(" · "));
-    setMsg($("#rd-err"), m.status === "finished" ? "" : "Measurement " + m.status + (m.error ? ": " + m.error : ""), m.status === "aborted" ? "" : "err");
+    setMsg($("#rd-err"), m.status === "finished" ? "" : "Measurement " + m.status + (jobReason(m) ? ": " + jobReason(m) : ""), m.status === "aborted" ? "" : "err");
     const res = m.result || {}, st = res.stats || {};
     const chips = [
       ["Points", res.n],
@@ -917,7 +1020,7 @@ async function openResult(id) {
       ["Mean", st.mean != null ? fmtNum(st.mean, 3) : null],
       ["Min", st.min != null ? fmtNum(st.min, 3) : null],
       ["Max", st.max != null ? fmtNum(st.max, 3) : null],
-      ["Push", (m.push_status || "off").replace("not_configured", "off")],
+      ["Push", (m.push_status || (m.output_status && m.output_status.push) || "off").replace("not_configured", "off")],
     ].filter(c => c[1] != null);
     $("#rd-chips").innerHTML = chips.map(c => `<div class="chip"><span>${c[0]}</span><b>${esc(c[1])}</b></div>`).join("");
     $("#rd-chips").hidden = chips.length <= 1;
@@ -929,7 +1032,7 @@ async function openResult(id) {
       $("#rd-plot").hidden = false;
       requestAnimationFrame(() => drawSpectrum());
     } else if (m.status === "finished") {
-      setMsg($("#rd-err"), "No decodable spectrum in this measurement.", "warn");
+      setMsg($("#rd-err"), m.spectrumError ? "No spectrum: " + m.spectrumError : "No decodable spectrum in this measurement.", "warn");
     }
     metaBlock(jobExtras(m), $("#rd-meta"));
     const csv = (m.files || []).find(f => /\.csv$/i.test(f));
@@ -1080,12 +1183,14 @@ $$("input[name=st-tab]").forEach(r => r.addEventListener("change", showSettingsT
 
 async function refreshInstrument() {
   try {
-    const st = (await API.req("/api/instrument/status")).instrument || {};
+    const r = await API.req("/api/instrument/status");
+    const st = r.instrument || r;                                  // v0.2.0 answers flat
     $("#st-ready").textContent = st.readyState
       ? st.readyState + (st.description ? " — " + st.description : "")
-      : (st.busy ? "busy: measuring" : "—");
-    $("#st-ready").className = "";
-    $("#st-session").textContent = st.session || (st.busy ? "in use by the running measurement" : "not connected yet (lazy)");
+      : st.connected ? "connected" : (st.busy ? "busy: measuring" : "not connected yet (connects on first job)");
+    $("#st-ready").className = st.connected ? "good" : "";
+    $("#st-session").textContent = st.phase || st.session || "—";
+    if (st.time) $("#st-time").textContent = st.time;
     const b = st.background || (LAST_HEALTH && LAST_HEALTH.background);
     const el = $("#st-bgrule");
     el.textContent = b ? `last ${b.measuredAt ? shortDt(b.measuredAt) : "never"} · limit ${b.maxAgeHours} h` : "—";
@@ -1095,24 +1200,61 @@ async function refreshInstrument() {
     $("#st-ready").textContent = "offline (" + e.message + ")";
     $("#st-ready").className = "bad";
   }
-  try { $("#st-time").textContent = (await API.req("/api/instrument/time")).time || "unreachable"; } catch (e) { /* offline */ }
-}
-function fmtUptime(s) {
-  if (s == null) return "—";
-  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-  return d ? `${d} d ${h % 24} h` : h ? `${h} h ${m % 60} min` : `${m} min`;
+  if ($("#st-time").textContent === "—") {   // pre-0.2.0 services had a separate clock endpoint
+    try { $("#st-time").textContent = (await API.req("/api/instrument/time")).time || "unreachable"; } catch (e) { /* not available */ }
+  }
 }
 function refreshService() {
-  const h = LAST_HEALTH;
-  $("#sv-base").textContent = API.base || "same origin";
-  if (!h) return;
-  $("#sv-ver").textContent = h.version || "—";
-  $("#sv-uptime").textContent = fmtUptime(h.uptime_s);
-  $("#sv-token").textContent = h.tokenRequired
-    ? (API.token ? "required · set in this browser" : "required (X-Fishy-Token) · not set")
-    : "off (loopback)";
-  $("#sv-dir").textContent = h.resultsDir || "—";
+  const h = LAST_HEALTH, D = defaults();
+  $("#sv-ver").textContent = h ? `${h.service || "fishy_ir"} v${String(h.version || "?").replace(/^v/, "")} · ${API.base || "same origin"}` : "not reachable · " + (API.base || "same origin");
+  $("#sv-ver").className = h ? "" : "bad";
+  $("#sv-engine").textContent = !h ? "—" : h.busy ? "busy · " + (h.phase || "measuring") : h.connected ? "connected" : "not connected yet (connects on first job)";
+  $("#sv-failure").textContent = (h && h.failure) || "none";
+  $("#sv-failure").className = h && h.failure ? "bad" : "";
+  $("#sv-token").textContent = API.token ? "set in this browser" : (h && h.tokenRequired ? "required · not set" : "not set (only needed on the LAN)");
+  $("#cfg-base").value = API.base;
+  $("#cfg-inst").value = store.get("fishyInstrument") || "";
+  $("#d-scans").value = D.scans; $("#d-res").value = D.res; $("#d-start").value = D.start; $("#d-end").value = D.end;
+  $("#d-det").value = D.det; $("#d-bgmode").value = D.bgmode; $("#d-path").value = D.path;
+  $("#d-push-url").value = D.pushUrl; $("#d-push-method").value = D.pushMethod;
+  setMsg($("#cfg-msg"), "");
 }
+$("#cfg-base-apply").onclick = async () => {
+  const v = $("#cfg-base").value.trim().replace(/\/+$/, "");
+  if (v && !/^https?:\/\/[^\s/]+/i.test(v)) return setMsg($("#push-msg"), "The service address must start with http:// or https://", "err");
+  API.base = v;
+  store.set("fishyBase", v);
+  Q.list = Q.add = "/api/queue";
+  setMsg($("#push-msg"), "Connecting to " + (v || "this page's server") + "…");
+  await tick();
+  setMsg($("#push-msg"), LAST_HEALTH ? "Connected · " + (LAST_HEALTH.service || "fishy_ir") + " v" + LAST_HEALTH.version : "No answer from " + (v || "this page's server"), LAST_HEALTH ? "ok" : "err");
+  refreshService();
+};
+$("#btn-token-clear").onclick = () => { API.setToken(null); toast("Token removed from this browser"); refreshService(); };
+$("#cfg-save").onclick = () => {
+  const num = (id, fb) => { const el = $(id); return el.value === "" ? fb : +el.value; };
+  const url = $("#d-push-url").value.trim();
+  if (url && !/^https?:\/\/[^\s/]+/i.test(url)) return setMsg($("#cfg-msg"), "The default endpoint must be an http(s) URL", "err");
+  const d = {
+    scans: num("#d-scans", BUILTIN.scans), res: num("#d-res", BUILTIN.res),
+    start: num("#d-start", BUILTIN.start), end: num("#d-end", BUILTIN.end),
+    det: $("#d-det").value, bgmode: $("#d-bgmode").value, path: $("#d-path").value.trim(),
+    pushUrl: url, pushMethod: $("#d-push-method").value,
+  };
+  if (d.start === d.end) return setMsg($("#cfg-msg"), "Start and end must differ", "err");
+  store.set("fishyDefaults", JSON.stringify(d));
+  const inst = $("#cfg-inst").value.trim();
+  store.set("fishyInstrument", inst);
+  $("#hdr-instrument").textContent = instrumentName();
+  setMsg($("#cfg-msg"), "Saved in this browser · used for every new measurement", "ok");
+};
+$("#cfg-reset").onclick = () => {
+  store.set("fishyDefaults", "{}");
+  store.set("fishyInstrument", "");
+  $("#hdr-instrument").textContent = instrumentName();
+  refreshService();
+  setMsg($("#cfg-msg"), "Back to the built-in defaults", "ok");
+};
 $("#btn-st-refresh").onclick = refreshInstrument;
 $("#btn-opt").onclick = async () => {
   const out = $("#opt-out"), msg = $("#opt-msg");
@@ -1162,7 +1304,10 @@ function lazyDetails(detailsSel, outSel, path, render) {
   });
 }
 lazyDetails("#con-details", "#con-out", "/api/settings/constraints", d => renderConstraints(d.settings));
-lazyDetails("#xml-details", "#xml-out", "/api/settings/instrumentxml", d => renderObject(d.instrumentxml || d));
+lazyDetails("#xml-details", "#xml-out", "/api/settings/instrumentxml", d =>
+  typeof d.xml === "string"
+    ? `<pre class="code xml">${esc(d.xml)}</pre>${d.file ? `<p class="hint">${esc(d.file)}</p>` : ""}`
+    : renderObject(d.instrumentxml || d));
 
 async function refreshApi() {
   $("#api-openapi").href = API.url("/openapi.yaml");
@@ -1198,12 +1343,11 @@ async function tick() {
     if (h) {
       if (h.tokenRequired && !API.token && !TOKEN_ASKED) promptToken();
       if (!h.busy) STOPPING = false;
-      if (Array.isArray(h.features) && h.features.includes("job.extras")) FEATURES.jobExtras = true;   // BACKEND_REQUESTS.md §5
-      try { JOBS = (await API.req("/api/jobs?limit=200")).jobs || []; } catch (e) { /* keep last */ }
+      try { JOBS = await listJobs(); } catch (e) { /* keep last */ }
       // ready-state probe: not while busy, and at most every 15 s (it talks to the engine)
       if (!h.busy && Date.now() - INST_AT > 15000) {
         INST_AT = Date.now();
-        try { INST = (await API.req("/api/instrument/status")).instrument || null; INST_ERR = null; }
+        try { const r = await API.req("/api/instrument/status"); INST = r.instrument || r; INST_ERR = null; }
         catch (e) { INST = null; INST_ERR = e.status === 401 ? null : e.message; }
       }
       if (h.busy) INST_ERR = null;

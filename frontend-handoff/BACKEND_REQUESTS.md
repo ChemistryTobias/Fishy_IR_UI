@@ -1,42 +1,19 @@
 # fishy_ir — backend requests from the UI
 
-The redesigned UI (`ui/`) lets an operator attach **optional metadata** to a
-measurement and choose **where the result goes** (a save-to path and/or an
-API endpoint with custom headers). The current API contract (`API.md`,
-`openapi.yaml`) has no fields for this. As `README.md` asks, these are raised
-here as product decisions instead of being invented in the UI.
+Request log between the UI and the service. Status as of **2026-10-27**
+(service v0.2.0):
 
-Everything else in the UI works with today's contract unchanged.
+| § | Request | Status |
+|---|---|---|
+| 1–3 | `metadata`, `output.path`, `output.push` on jobs | ✅ implemented in v0.2.0. The UI sends them as first-class fields. |
+| 4 | error shape | ✅ |
+| 5 | `features: ["job.extras"]` flag | superseded: no longer needed, the UI assumes v0.2.0 |
+| 6 | **contract mismatches between `API.md` and `openapi.yaml`** | 🔧 **open, please confirm** |
+| 7 | **editable service configuration** (KNOWN_ISSUES #6) | 🔧 **open, new** |
+| 8 | instrument model for the header (KNOWN_ISSUES #4, optional) | 🔧 open, optional |
 
----
-
-## What the UI does today (works with the current service)
-
-Until the service supports the fields below, the UI packs them into the job's
-existing free-text `notes` field as a small JSON envelope:
-
-```json
-{
-  "fishy_ui": 1,
-  "metadata":     { "sample": { "material": "PMMA", "thickness_um": 80 }, "operator": "TT" },
-  "metadataText": "sample:\n  material: PMMA\n  thickness_um: 80\noperator: TT",
-  "output": {
-    "path": "D:\\data\\ftir\\2026\\pmma\\",
-    "push": { "url": "https://eln.example.org/api/v1/ftir", "method": "POST",
-              "headers": { "Authorization": "Bearer …", "X-Project": "ssr-ftir" } }
-  }
-}
-```
-
-The data stays with the job and is shown again in the UI, but the service
-treats it as plain text:
-
-* metadata is **not** in the result files or the push payload;
-* the result is **not** saved to `output.path`;
-* nothing is sent to `output.push`;
-* header values (possibly secrets) can be read by anyone who can list jobs.
-
-The UI says this in the form (a "Needs a service update" note).
+Jobs created by UI builds from before v0.2.0 carry their extras inside
+`notes` as a `{"fishy_ui": 1, …}` JSON envelope. The UI still reads those.
 
 ---
 
@@ -89,6 +66,72 @@ real fields first and falls back to the envelope, so old jobs keep displaying.
 Optional migration: on start-up, the service can lift existing envelopes
 (`notes` that parse as JSON with `"fishy_ui": 1`) into the new fields and
 clear `notes`.
+
+---
+
+### 6. Contract mismatches to confirm (open)
+
+The v0.2.0 `API.md` says "the code wins", but `openapi.yaml` was only
+partly updated. The UI copes with both versions (shown in brackets below);
+please confirm which is correct and align `openapi.yaml`:
+
+| Topic | `API.md` §4 | `openapi.yaml` | What the UI does |
+|---|---|---|---|
+| list jobs | `GET /api/queue` → `{queue:[…]}` | `GET /api/jobs` → `{jobs:[…]}` | tries `/api/queue`, falls back to `/api/jobs` on 404 |
+| add a job | `POST /api/queue` (`start_now` default **true**) | `POST /api/jobs` (`start_now` default **false**) | tries `/api/queue`, falls back on 404/405; always sends `start_now` explicitly |
+| start a queued job | *not listed* | `POST /api/jobs/<id>/start` | calls it; on 404/405 it shows "this service version cannot start a queued measurement". **Without this endpoint "Add to queue" jobs can never be started**, so please keep it (or document the replacement). |
+| `output.push` | a URL string | `{url, method, headers}` | **sends the object**, reads both |
+| failure text | `reason` | `error` | reads `reason`, falls back to `error` |
+| running job id | `/health` has no `current` | `current` | uses `current` if present, otherwise the `running` row of the queue |
+| peaks | `{x, y, prominence}` | `{pos, prominence}` | reads both |
+| `/health` | no `tokenRequired` / `resultsDir` / `uptime_s` | (old fields) | prompts for a token on the first 401 and shows the documented `measurements\<id>-<name>\` location |
+
+**PATCH with redacted headers.** `GET` returns push header values as `***`.
+Please define what `PATCH {output: …}` does with them. The UI avoids the
+problem by leaving `output` out of a PATCH when the operator didn't touch it,
+and by refusing to save a changed endpoint while values still read `***`.
+Suggested rule: an omitted `output` keeps the stored one; a `***` value keeps
+the stored value for that header.
+
+### 7. Editable service configuration (open, KNOWN_ISSUES #6)
+
+Operators asked to change the configuration (instrument endpoint etc.) in
+the UI. Today it only lives in `config/fishy_ir.json` (edit the file, restart).
+What the UI can already do on its own, stored in the browser:
+
+* service address (`API.base`, same as `?base=`),
+* token set / forget,
+* the instrument name shown in the header,
+* defaults for new measurements (scans, resolution, range, detector,
+  background mode, save-to path, push URL and method; push headers are
+  never stored).
+
+For the **service** settings, please add:
+
+```
+GET   /api/config            → { ok, config: { … }, editable: ["push.url", …], restartRequired: ["host", "port", "token"] }
+PATCH /api/config            body: { "<dotted.key>": value, … }  → { ok, config, restartRequired: bool }
+```
+
+* only while idle (`409` while a measurement runs), token required even on
+  loopback for writes;
+* validate every key (`400 {ok:false,error}`), write the file atomically,
+  keep a `.bak`;
+* candidate keys: default `push.url` / headers (write-only, redacted like
+  §3), `output.allowedRoots`, `background.maxAgeHours`, instrument display
+  name (§8), engine/OMNIC paths, `host` / `port` / `token` (restart required);
+* engine and instrument parameters stay read-only, as they are today.
+
+The UI will add an "Service configuration" form to Settings once this exists
+(today the settings panel says where to change the file).
+
+### 8. Instrument model for the header (optional, KNOWN_ISSUES #4)
+
+The header shows "FTIR measurement service" plus an instrument name. Today
+that name comes from a browser setting (default "Thermo Fisher · Nicolet
+Summit X"). If `/api/instrument/status` (or `/health`) returned e.g.
+`"model": "Nicolet Summit X", "vendor": "Thermo Fisher"`, every browser would
+show the right instrument without configuration.
 
 ---
 
