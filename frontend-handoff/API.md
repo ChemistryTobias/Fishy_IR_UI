@@ -1,290 +1,199 @@
-# fishy_ir — API description (for the UI)
+# fishy-ir — API contract (v0.2.0, current)
 
-The UI in `ui/` talks to a REST API. **This file and `openapi.yaml` are the
-complete contract you need** — everything the backend does for the UI, with
-request/response shapes. No backend code is included in this bundle.
+> This document matches `src/fishy-ir/fishy_ir/app.py` as of 2026-10-27
+> (omnic-cli 2.5.2). Where it differs from the earlier dev-era draft
+> (staged jobs, `/api/jobs/<id>/...`), the code below wins.
+> `/api/docs` on a running service always returns the live endpoint table.
 
-Base URL in all examples: `http://localhost:8385` (default service port).
+Base URL: `http://localhost:8385` (default).
 
----
+## 1. Transport
 
-## 1. Transport rules everyone should know
+* JSON in / JSON out.
+* Errors: `{"ok": false, "error": "human readable text"}` + the right status
+  (400 / 401 / 404 / 409).
+* **Auth**: loopback → no token. LAN (`--host 0.0.0.0 --token auto`) →
+  `X-Fishy-Token: <token>` header **or** `?token=<token>` on every `/api/*`
+  (except `/health` and `GET /` — the UI handles the token via a prompt +
+  `localStorage`, no code needed).
+* **Concurrency rule (single session):** at most ONE measurement is in flight.
+  A second start is **409** `{"ok":false,"busy":true,"current":"<running-job>"}`.
+  The UI must show this in-band; there is no server queue retry.
 
-### 1.1 JSON in, JSON out
-All APIs are `application/json`. Errors always look like:
-
-```json
-{ "ok": false, "error": "human readable reason" }
-```
-
-with the right HTTP status (400 bad input, 401 bad/missing token,
-404 not found, 409 conflict/busy). Never rely on parsing `error` text —
-rely on the status code and the stable extra fields (e.g. `busy`, `current`).
-
-### 1.2 Authentication (token flow)
-* When the service is bound to **loopback only**, there is **no token** and
-  every call works.
-* When reachable on a **LAN**, a token is required on every `GET/POST/...`
-  to `/api/*`:
-  * header `X-Fishy-Token: <token>`, or
-  * query `?token=<token>`.
-  * The UI already implements this: it prompts once and stores the token in
-    `localStorage.fishyToken` (sent as the header). A wrong token → `401`.
-* `GET /health` and the UI assets are **always public** (they reveal
-  nothing sensitive, and the local operator must always be able to see the
-  page).
-
-**How to get the token**: the operator runs the service on the instrument
-PC and reads it from the console banner (`Token: …`) or from
-`config/fishy_ir.token` next to the config. It is never returned by the API.
-
-### 1.3 CORS & standalone (how to develop this UI)
-The service answers **cross-origin** fetches (it sends
-`Access-Control-Allow-Origin` for whatever origin fetches it and allows the
-`X-Fishy-Token` header). So to work on this UI you do **not** need the
-service code — just a service to point at:
-
-1. **Safest / most realistic**: run the real service on the instrument PC
-   (or anywhere) and point this UI at it:
-   ```
-   http://localhost:8400/index.html?base=http://HOST:8385
-   ```
-   `?base=` (or `localStorage.fishyBase` once set) in `ui/app.js` prefixes
-   every API call. Without it the UI uses its own origin (the normal case).
-2. Any static file server works (`python -m http.server`, VS Code "Live
-   Server", `npx serve`…).
-3. When you embed the improved UI back into the service's `ui/` folder, the
-   `?base=` mechanism simply stays inert (same-origin default).
-
-> If you want a zero-setup playground without any real instrument, ask the
-> service owner for a small mock — do not invent response shapes yourself;
-> use the examples in § below (they are taken verbatim from the service).
-
----
-
-## 2. Jobs (the measurement queue)
-
-### 2.1 Add a job   `POST /api/jobs`
-Adding **always** succeeds (even while another measurement runs) — the job
-lands in the queue as `staged`.
-
-```http
-POST /api/jobs
-{ "name": "pellet-01", "kind": "sample",
-  "params": { "scans": 10, "resolution": 4, "start": 400, "end": 4000 } }
-```
-→ `201` `{ "job": {...} }`
-
-* `kind`: `"sample"` (default) or `"background"`.
-* `params` accepts **friendly aliases** (validated here, not by the engine):
-  `scans`, `resolution`, `start`, `end` (cm⁻¹), `velocity`, `detector`,
-  `beamsplitter`, `source`, `format`, `apodization`, `phase`, `background`.
-  Unknown keys pass through untouched (power users).
-* Bad params → `400` with a helpful message, e.g.
-  `detector must be one of: TGSA, TGSB, … (current: DTGS)`.
-
-### 2.2 List jobs    `GET /api/jobs?status=<status>&limit=<n>`
-`status` filter: `staged | running | finished | failed | aborted` (omit =
-all). → `200 { "jobs": [ ... ] }`
-
-A **job object** (used everywhere):
-```json
-{
-  "id": "9f2c…", "name": "pellet-01", "kind": "sample",
-  "status": "staged",                 // staged | running | finished | failed | aborted
-  "params": { "scans": 10, "resolution": 4.0, "start": 400, "end": 4000 },
-  "paramsSummary": "scans=10 resolution=4 start=400 end=4000",
-  "attempts": 0, "createdAt": "2026-…", "started": null, "finished": null,
-  "error": null,
-  "result": null                      // see §3 — present after a finished run
-}
-```
-
-### 2.3 Get / edit / delete one job
-```
-GET    /api/jobs/<id>                 → { "job": {...} }          (404 if unknown)
-PATCH  /api/jobs/<id>                 body: {name?, kind?, params?}
-                                         only while status == "staged",
-                                         else 409 "job is running or done (edit only staged jobs)"
-DELETE /api/jobs/<id>                 202 while staged; 409 while running
-```
-
-### 2.4 Start / stop
-```
-POST /api/jobs/<id>/start    202 {job:{status:"running"}}   | 409 busy (see below)
-POST /api/jobs/<id>/stop     202 (stop queued)              | 409 "nothing is running"
-```
-**Concurrency rule (the one rule that matters):**
-```http
-POST /api/jobs/<id>/start    (while another measurement is running)
-→ 409 { "ok": false, "error": "instrument busy — waiting for the running measurement",
-        "busy": true, "current": "<id of the running job>" }
-```
-The UI must show this in-band (toast/inline), **not** as a global alert, and
-ideally highlight the job that is currently running (`current`).
-
-`stop` is honored within ~8 seconds in any phase and the job ends as
-`aborted` (distinct from `failed`). `POST /api/instrument/stop` is the same
-thing without a job id (the big Stop button).
-
----
-
-## 3. Results
-
-### 3.1 List finished        `GET /api/finished`
-→ `200 { "ok": true, "measurements": [ {...job object, status:"finished" or "failed" or "aborted", with result...} ] }`
-
-### 3.2 One result + decoded spectrum
-`GET /api/finished/<id>?spectrum=1`
-
-```json
-{
-  "ok": true,
-  "measurement": {
-    "id": "…", "name": "pellet-01", "kind": "sample", "status": "finished",
-    "started": "…", "finished": "…",
-    "files": ["measurements/pellet-01_2026…_sample/sample.csv"],
-    "result": {
-      "title": "pellet-01_2026…_sample",
-      "unit": "%T",
-      "n": 2001,
-      "xMin": 400.0, "xMax": 4000.0,
-      "x": [400, …],            // wavenumbers (cm⁻¹) — only when ?spectrum=1
-      "y": [98.2, …],           // intensity — only when ?spectrum=1
-      "stats": { "min": 2.1, "mean": 87.4, "max": 100.2, "n": 2001 },
-      "peaks": [ { "pos": 3285.5, "prominence": 41.2 }, … ],
-      "sourceFile": "measurements/…/sample.raw.xml"
-    },
-    "push_status": "not_configured"   // | sent | failed
-  }
-}
-```
-* `x`/`y` are plain arrays (the UI already draws them on `<canvas>`).
-* A **failed/aborted** measurement has the same shape but `result: null`
-  and `error: "…"` (human readable, safe to show as-is).
-
-### 3.3 Download raw files
-The UI's "file" links are plain `GET`s (so they work as an `<a href>`):
-
-```
-GET /api/finished/<id>/file/<filename>      → raw bytes, Content-Type by
-                                               extension (csv → text/csv, etc.)
-```
-Filename is the last path segment of the entry in `result.files`. 404 if the
-file no longer exists on disk (results dir was cleaned) — the UI then hides
-the link, which you can keep.
-
----
-
-## 4. Instrument (read-only)
+## 2. Health / meta
 
 ```
 GET /health
-  → { ok, service, version, uptime_s,
-      busy, current,          // null when idle — drive the top status pill
-      phase,                  // idle | connecting | collecting | processing | pushing
-      connected,              // false when never connected (UI shows "offline")
-      tokenRequired,          // true → show the token prompt
-      resultsDir,             // show as read-only text on the settings view
-      background: { ok, maxAgeHours, measuredAt, ageHours, job, warning } }
+→ { "ok": true, "service": "fishy_ir", "version": "0.2.0",
+    "connected": true|false,          // engine session alive
+    "busy":      true|false,          // measurement in flight
+    "phase":     "collecting"|"decoding"|"pushing"|"idle"|null,
+    "background": { "ok": bool, "measuredAt": str|null, "ageHours": 8.2,
+                    "maxAgeHours": 24, "warning": "…" | null },
+    "failure":   "…" | null }         // last engine error, safe to display
 ```
 
-The **background warning** is the one you must surface prominently (it has
-its own rule): when `background.ok == false`, show `background.warning`
-verbatim in a yellow banner and offer "Measure background now" (which is
-just `POST /api/jobs {"kind":"background","params":{...user choice...}}`).
-
 ```
-GET /api/instrument/status
-  → if busy:  { instrument: { busy: true, current: <id> } }
-  → if idle:  { instrument: { readyState, description, session, background } }
-
-GET /api/instrument/time
-  → { "time": "2026-10-22T18:14:48" }          (instrument clock; null if unreachable)
+GET /api/docs            → live endpoint table + detector codes
+GET /openapi.yaml        → machine-readable spec (this folder's copy)
 ```
 
----
-
-## 5. Engine settings (read-only)
-
-These are snapshots of what the engine currently has configured — **never
-editable** through this API (that is a hard product rule; the UI already
-treats them as read-only, keep it that way).
+## 3. Instrument
 
 ```
-GET /api/settings/constraints
-  → { settings: { param: { valid: [lo,hi], step, unit, name, label, description }, … } }
+GET  /api/instrument/status
+→ { "ok": true, "connected": true, "phase": "idle", "time": "2026-10-27 …",
+    "background": { "ok": true, "measuredAt": "…", "ageHours": 3.1,
+                    "maxAgeHours": 24, "warning": null } }
+
+POST /api/instrument/stop        → 202 {ok:true}  |  409 "nothing is running"
+```
+
+## 4. Measurements (queue)
+
+### 4.1 List
+```
+GET /api/queue
+→ { "ok": true, "queue": [
+    { "id": "ab12…", "kind": "background", "name": "background 20261027_1230",
+      "status": "staged|running|finished|failed|aborted",
+      "kind": "background"|"sample",
+      "created": "...", "started": "...|null", "finished": "...|null",
+      "reason": "…"|null, "metadata": {...}|null, "output": {...}|null,
+      "output_status": {"path":..., "push": "sent|failed|…"} | null,
+      "result": { "title","unit","n","xMin","xMax","interferogram",
+                  "stats": {"min","max","mean","std"},
+                  "peaks": [{"x","y","prominence"}…8],
+                  "sourceFile": "omnic-data\\…_DataVectorXml.xml" } | null }
+  ] }
+```
+
+### 4.2 Enqueue (the only way to add work)
+```
+POST /api/queue
+body:
+{
+  "kind": "background" | "sample",
+  "name": "optional label (default: '<kind> <ymdhms>_<ms>')",
+  "start_now": true | false,          // default true
+  "params": {                         // optional wire params (see §4.4)
+     "scans": 32, "resolution": 4, "format": "Transmittance",
+     "start": 4000, "end": 600, "detector": "TGSA", "background": "None"
+  },
+  "metadata": { "operator": "cb" },   // optional, round-trips untouched
+  "output": {                         // optional per-job extras (never fail the run)
+    "path": "C:\\shared",             // copy result files here
+    "push": "https://lab/api/spectra" // HTTP POST the payload here
+  }
+}
+→ 201 { ok, queue, job }   |   409 { ok:false, busy:true, current }
+```
+
+* `params: {}` is exactly the same as omitting `params`.
+* Job-level keys (`kind`, `name`, `start_now`, `params`, `metadata`, `output`)
+  **never** reach the wire — only `params.*` does.
+
+### 4.3 Job control
+```
+GET    /api/jobs/<id>          → { job }                    (404 if unknown)
+PATCH  /api/jobs/<id>          body {name|kind|params|metadata|output}  — only while "staged"
+DELETE /api/jobs/<id>          — only while "staged"
+POST   /api/instrument/stop    — stop whatever is running (≈8 s, ends "aborted")
+```
+
+### 4.4 Allowed `params` (wire params, validated)
+| key | meaning | example |
+|---|---|---|
+| `scans` | number of scans | 32 |
+| `resolution` | cm⁻¹ | 1, 2, 4, 8 |
+| `format` | spectral format | `Transmittance` (default) |
+| `start` / `end` | range limits, cm⁻¹ | 4000 / 600 |
+| `detector` | code or name (see `/api/docs → params.detectors`) | `TGSA` (iS20 DTGS) |
+| `background` | `None`(0) \| `BeforeCollect`(2) | `None` |
+| `resolution` | cm⁻¹ (1, 2, 4, 8) | 4 |
+| `velocity` | cm/s — **must hit the driver table exactly** | 0.4747 (see Settings) |
+| + | `beamsplitter source format apodization phase gain zeroFill resetServo` + raw wire keys pass through | |
+
+Valid name sets today: format `SingleBeam`, beamsplitter `Ge_KBr`, source
+`Globar`, apodization `Norton_Beer_Strong`, phase `Phase_Mertz`, background
+`None`/`BeforeCollect`. Unknown keys are passed through untouched (the
+engine validates and reports back — invalid values surface as the job's
+`reason`). **Prefer not to expose `velocity` in the UI** — show it from
+`/api/settings/optimal` and send `detector` + `background` only.
+
+## 5. Results
+
+```
+GET /api/finished                                        → all finished (rows like §4.1)
+GET /api/finished/<id>?spectrum=1                        → row + decoded spectrum
+```
+
+`?spectrum=1` adds (only when a decodable file exists):
+
+```json
+"result": { …,
+  "x": [4000, 3996, …],              // wavenumbers, cm⁻¹, ≤ 15000 pts
+  "y": [97.8, 97.5, …],              // intensity
+  "sourceFile": "omnic-data\\…_DataVectorXml.xml"
+}
+```
+* no spectrum (all files undecodable): `"spectrumError": "…"` on the row —
+  show it, don't alert.
+* download: `GET /api/finished/<id>/file/<filename>` (raw bytes; filename =
+  last path segment of an entry in the job's `files`; 404 if rotated out).
+
+**Where files live on the instrument PC**
+* engine working set (XML + CSV): `<service base>\omnic-data\`
+* finished copies (XML + CSV):   `<service base>\measurements\<8-char-id>-<name>\`
+  (always created for finished jobs since 0.2.0/2.5.2)
+
+## 6. Settings (read-only)
+
+All endpoints return the engine's current values — **read-only by design**;
+changes are made in OMNIC, not here.
+
+```
+GET /api/settings/params
+→ { params: { backgroundStatus: "valid|stale", changes: [], … } }
 
 GET /api/settings/optimal?detector=TGSA
-  → { optimal: { detector, detectorTable, optimalVelocity, range } }
+→ { detector: "TGSA", velocity: 0.4747, startFrequency: 2152800.0,
+    endFrequency: 1076400.0 }        // driver table — use for display only
 
-GET /api/settings/instrumentxml
-  → { instrumentxml: { benchType, benchTypeName, benchInfo, benchSerial, … } }
+GET /api/settings/constraints
+→ { settings: { OpticalVelocity: { valid: [0.4747, 0.4747], step: 0,
+                                   name: "…", label: "…", description: "…" }, … } }
 
-GET /api/settings/params
-  → { params: { "<ParamName>": { name, description, values, … }, … } }
+GET /api/settings/instrumentxml     → { xml: "<…driver config XML…>", file: "…" }
 ```
-All four fail (→ JSON error + ≥500 or 400) when the engine cannot be
-reached; the UI already degrades gracefully to "instrument offline" — keep
-that behaviour, don't make these 500s fatal to the page.
+Detector codes: `TGSA TGSB TGSC TGSD MCTA MCTB PBSE INGAAS INSB SI PBS GE
+HIGHDCT HIGHDMCT`.
+(On iS20 DTGS the working code is `TGSA`; velocity `0.4747` cm/s — the
+collect uses it automatically.)
 
-`detector` for `/api/settings/optimal?detector=` is a **code** (e.g.
-`TGSA`, `TGSB`, `MCTA`, `INBA`, …) — the UI may present the human name
-(`Instrument Settings` values are the *names*; map by display only, always
-send the code you are given in the constraints/params `name`).
+## 7. UI structure (what you're improving)
 
----
+Five views (`#nav` tabs): **queue / live / results / settings / api** + a
+**hero** (header, background banner, "Measure background now") above them
+and a sticky **footer** below.
 
-## 6. Push (informational for the UI)
+* `ui/index.html` — DOM skeleton
+* `ui/style.css`  — all styles; design tokens = CSS vars at the top
+  (`--bg --panel --panel2 --line --text --muted --accent --accent2 --ok --warn --err --mono`)
+* `ui/app.js`     — client; ALL fetches go through `API.req(path[, opts])`
+  (token, JSON, error toast). API base = `API.base`
+  (`?base=http://host:port` overrides, handy for local dev).
 
-If the operator configures `push.url`, every finished measurement is POSTed
-to it with:
-```json
-{ "source": "fishy_ir", "job": "<id>", "name": "…", "kind": "…",
-  "params": {…}, "started": "…", "finished": "…",
-  "files": ["…"], "result": { "title","n","stats","peaks",… } }
-```
-* `push.status` on each measurement: `not_configured | sent | failed`.
-* `POST /api/push/test` → sends a fixed stub payload so the operator can
-  verify the sink; UI already has a "Test push" button (`#btn-pushtest`).
-* A refused push **never** fails the measurement — the local files are
-  authoritative. The UI should reflect `push_status: "failed"` as a
-  yellow/red badge on that row, not as a global error.
+Key ids: `status-line` · `bg-banner / btn-bg` · `q-form / btn-add /
+btn-addstart / q-table` · `lv-*` (live banner) · `res-table / res-detail /
+rd-canvas` (spectrum canvas) · `st-*` (settings) · `toasts` · `tk-*` (token
+prompt).
 
----
+**Hard requirements (keep):** no framework, no CDN, no build step — the UI
+must work on an air-gapped Windows PC from plain files.
 
-## 7. Reference endpoint (for the UI's own "API" tab)
+## 8. Open items (from the instrument-UI session, 2026-10-27)
 
-```
-GET /api/docs
-  → { service, version, auth, "openapi": "/openapi.yaml",
-      params: {aliases: […], note: "…", detectors: […]},
-      endpoints: [ {method, path, description}, … ] }
-```
-The current `ui/app.js` renders this directly into the **API** view — you
-can keep it as the source of truth (it always matches the running service),
-or hard-code your own copy; both are fine. `openapi.yaml` in this folder is
-the machine-readable version of the same contract.
-
----
-
-## 8. UI structure cheat-sheet (what you're improving)
-
-Five views (tabs in `#nav`): **queue / live / results / settings / api**.
-
-* `index.html`  — DOM; each view is a `<section id="view-*">`
-* `style.css`   — all styles; design tokens are CSS vars at the top:
-  `--bg --panel --panel2 --line --text --muted --accent --accent2 --ok
-   --warn --err --mono`
-* `app.js`      — the client; the **only** API entry point is `API.req(path, opts)`.
-  Every fetch goes through there (auth header, JSON, error handling).
-  The API base lives in `API.base` (see §1.3).
-
-Key ids you'll touch:
-`status-line` (global pill) · `q-form / btn-add / btn-addstart` ·
-`q-table` (queue rows) · `lv-*` (live banner, phase, stop button) ·
-`res-table / res-detail / rd-canvas` (spectrum) · `bg-banner` (background
-rule) · `tk-prompt / tk-input` (token) · `toasts`.
-
-Conventions in the existing code: **no framework, no build step, no CDN**
-(must keep working offline / air-gapped). Keep it that way.
+See `KNOWN_ISSUES.md` — it separates *fixed-in-0.2.0/2.5.2* from *still open*.
+The UI redesign asks (header text, footer, button size) are **open** and are
+styling-only — none of them change this contract.

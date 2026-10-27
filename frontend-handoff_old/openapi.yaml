@@ -1,0 +1,205 @@
+openapi: "3.0.3"
+info:
+  title: fishy_ir — Thermo Fisher FTIR instrument service
+  version: "0.1.0"
+  description: |
+    Measurement queue + live status + decoded results + optional result push,
+    over the OMNIC Paradigm engine (single instrument session).
+    One measurement at a time: `start` while busy answers 409 with `{busy: true, current: <id>}`.
+    `POST /api/jobs` (add) is always allowed — queued jobs are staged, editable, deletable.
+    When bound to a non-loopback address without a configured token, every /api/* call needs
+    the token header `X-Fishy-Token` (or `?token=`).
+servers:
+  - url: http://<host>:8385
+security:
+  - fishyToken: []
+tags:
+  - {name: jobs}
+  - {name: instrument}
+  - {name: results}
+  - {name: system}
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      security: []
+      summary: liveness + busy state (no instrument traffic)
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Health"}}}}
+  /api/jobs:
+    get:
+      tags: [jobs]
+      summary: list jobs
+      parameters:
+        - {name: status, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer}, default: 200}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {jobs: {type: array, items: {$ref: "#/components/schemas/Job"}}}}}}}
+    post:
+      tags: [jobs]
+      summary: add a job (staged); `start_now: true` enqueues and starts (409 if busy)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/JobCreate"}
+      responses:
+        "201": {description: added (+started when start_now)}
+        "400": {description: "bad params → {ok:false,error:'…'}"}
+        "409": {description: "start_now while busy → {ok:false,busy:true,current:<id>}",
+               content: {application/json: {schema: {$ref: "#/components/schemas/Busy"}}}}
+  /api/jobs/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      tags: [jobs]
+      summary: job detail (+ live phase when running)
+      responses: { "200": {description: ok}, "404": {description: not found} }
+    patch:
+      tags: [jobs]
+      summary: edit a staged job (name / notes / params / kind)
+      responses: { "200": {description: ok}, "400": {description: bad params}, "409": {description: not editable now} }
+    delete:
+      tags: [jobs]
+      summary: remove a job
+      responses: { "200": {description: ok}, "404": {description: not found} }
+  /api/jobs/{id}/start:
+    post:
+      tags: [jobs]
+      summary: start a queued measurement now
+      responses:
+        "202": {description: accepted}
+        "409": {description: "busy or not startable → {ok:false,busy?,current?,error}",
+               content: {application/json: {schema: {$ref: "#/components/schemas/Busy"}}}}
+  /api/jobs/{id}/stop:
+    post:
+      tags: [jobs]
+      summary: abort a running measurement (engine abort, effective within ~5 s)
+      responses: { "202": {description: stop requested + engine accepted} }
+  /api/instrument/status:
+    get:
+      tags: [instrument]
+      summary: engine ready-state (idle) or live phase (busy)
+      responses: { "200": {description: ok} }
+  /api/instrument/time:
+    get:
+      tags: [instrument]
+      summary: instrument clock
+      responses: { "200": {description: ok} }
+  /api/instrument/stop:
+    post:
+      tags: [instrument]
+      summary: stop the currently running measurement
+      responses: { "202": {description: stop requested}, "409": {description: nothing running} }
+  /api/finished:
+    get:
+      tags: [results]
+      summary: all finished measurements (summary rows, newest first)
+      responses: { "200": {description: ok} }
+  /api/finished/{id}:
+    get:
+      tags: [results]
+      summary: one measurement; `?spectrum=1` adds decoded x[], y[], stats, peaks[]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: spectrum, in: query, schema: {type: string}}
+      responses: { "200": {description: ok}, "404": {description: not found} }
+  /api/finished/{id}/file/{name}:
+    get:
+      tags: [results]
+      summary: raw measurement file (.xml / .csv / .summary.json)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: file bytes, Content-Disposition attachment}
+  /api/settings/{what}:
+    get:
+      tags: [instrument]
+      summary: "read-only: what ∈ constraints | optimal | instrumentxml | params"
+      parameters:
+        - {name: what, in: path, required: true, schema: {type: string}}
+        - {name: detector, in: query, schema: {type: string}, default: TGSA}
+      responses: { "200": {description: ok} }
+  /api/push/test:
+    post:
+      tags: [system]
+      summary: fire the configured result push once with a test payload
+      responses: { "200": {description: {ok, status} } }
+  /api/docs:
+    get:
+      tags: [system]
+      security: []
+      summary: endpoint index + param aliases (this contract)
+      responses: { "200": {description: ok} }
+
+components:
+  securitySchemes:
+    fishyToken:
+      type: apiKey
+      in: header
+      name: X-Fishy-Token
+  schemas:
+    Health:
+      type: object
+      properties:
+        ok: {type: boolean}
+        service: {type: string}
+        version: {type: string}
+        busy: {type: boolean}
+        current: {type: [string, "null"]}
+        phase: {type: string}
+        connected: {type: boolean}
+        tokenRequired: {type: boolean}
+        resultsDir: {type: string}
+        background: {$ref: "#/components/schemas/Background"}
+    Background:
+      type: object
+      description: "last background freshness — the UI banner and /health both read this"
+      properties:
+        ok: {type: boolean, description: "true if a background exists and is fresh"}
+        measuredAt: {type: [string, "null"]}
+        ageHours: {type: [number, "null"]}
+        maxAgeHours: {type: number}
+        warning: {type: [string, "null"]}
+    JobCreate:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [sample, background]}
+        name: {type: string}
+        notes: {type: string}
+        start_now: {type: boolean, default: false}
+        params:
+          type: object
+          description: |
+            Friendly aliases or raw wire keys (unknown keys pass through).
+            aliases: scans, resolution, start, end (cm-1), velocity,
+            detector (TGSA|TGSB|TGSC|TGSD|MCTA|PBS|GE), beamsplitter (Ge_KBr|ZnSe|KBr),
+            source (Globar), format (SingleBeam|FTIR|Transmittance|Absorbance),
+            apodization (Norton_Beer_Strong), phase (Phase_Mertz),
+            background (BeforeCollect|AfterCollect|Off), gain, zeroFill, resetServo
+    Job:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        kind: {type: string}
+        status: {type: string, enum: [staged, running, finished, failed, aborted]}
+        notes: {type: string}
+        params: {type: object}
+        paramsSummary: {type: string}
+        created: {type: string}
+        started: {type: [string, "null"]}
+        finished: {type: [string, "null"]}
+        error: {type: [string, "null"]}
+        files: {type: array, items: {type: string}}
+        push_status: {type: string}
+    Busy:
+      type: object
+      description: stable busy-rejection shape
+      properties:
+        ok: {type: boolean, example: false}
+        error: {type: string}
+        busy: {type: boolean, example: true}
+        current: {type: string, description: id of the running job}

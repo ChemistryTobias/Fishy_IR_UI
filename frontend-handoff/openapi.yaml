@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 info:
   title: fishy_ir — Thermo Fisher FTIR instrument service
-  version: "0.1.0"
+  version: "0.2.0"
   description: |
     Measurement queue + live status + decoded results + optional result push,
     over the OMNIC Paradigm engine (single instrument session).
@@ -38,7 +38,7 @@ paths:
         "200": {description: ok, content: {application/json: {schema: {type: object, properties: {jobs: {type: array, items: {$ref: "#/components/schemas/Job"}}}}}}}
     post:
       tags: [jobs]
-      summary: add a job (staged); `start_now: true` enqueues and starts (409 if busy)
+      summary: "add a job (staged); start_now: true enqueues and starts (409 if busy)"
       requestBody:
         required: true
         content:
@@ -76,6 +76,17 @@ paths:
       tags: [jobs]
       summary: abort a running measurement (engine abort, effective within ~5 s)
       responses: { "202": {description: stop requested + engine accepted} }
+  /api/jobs/{id}/push/test:
+    post:
+      tags: [jobs]
+      summary: fire the job's output.push endpoint once (before measuring)
+      description: Requires the job to have output.push set. Uses a stub payload.
+      responses:
+        "200": {description: "sink accepted → {ok:true,status}",
+               content: {application/json: {schema: {type: object}}}}
+        "400": {description: no output.push configured on this job}
+        "502": {description: "sink refused or errored (ok:false + error)",
+               content: {application/json: {schema: {type: object}}}}
   /api/instrument/status:
     get:
       tags: [instrument]
@@ -170,6 +181,22 @@ components:
         name: {type: string}
         notes: {type: string}
         start_now: {type: boolean, default: false}
+        metadata:
+          type: object
+          description: "Optional, any JSON object (max 64 KB). Carried with the measurement, attached to the push payload, written as metadata.json beside the results."
+        output:
+          type: object
+          description: Optional result destination.
+          properties:
+            path: {type: string, description: Directory the finished run's files are copied into (root allow-list applies).}
+            push:
+              type: object
+              description: Per-job result sink (fired after the measurement).
+              required: [url]
+              properties:
+                url: {type: string, format: uri}
+                method: {type: string, enum: [POST, PUT, PATCH], default: POST}
+                headers: {type: object, additionalProperties: {type: string}, description: "Operator header name/value pairs, sent verbatim; values redacted to *** in responses"}
         params:
           type: object
           description: |
@@ -195,6 +222,17 @@ components:
         error: {type: [string, "null"]}
         files: {type: array, items: {type: string}}
         push_status: {type: string}
+        metadata: {type: [object, "null"], description: "The job's metadata object (verbatim)"}
+        output: {type: [object, "null"], description: "Job's output config; push.headers values redacted to ***"}
+        output_status:
+          type: [object, "null"]
+          description: Post-run result of the copy/push extras
+          properties:
+            path: {type: [string, "null"], enum: [copied, failed, "null"]}
+            pathError: {type: [string, "null"]}
+            push: {type: [string, "null"], enum: [sent, failed, "null"]}
+            pushHttpStatus: {type: [integer, "null"]}
+            pushError: {type: [string, "null"]}
     Busy:
       type: object
       description: stable busy-rejection shape
