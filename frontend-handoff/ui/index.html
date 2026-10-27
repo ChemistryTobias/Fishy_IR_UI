@@ -3,25 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="color-scheme" content="light">
-<title>fishy_ir · FTIR · MPI-FKF</title>
+<title>FTIR measurement service · fishy_ir</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23006C66'/%3E%3Cpath d='M4 9 H9 L12 22 L15 12 L18 18 L21 7 L24 16 H28' stroke='white' stroke-width='2.4' fill='none' stroke-linejoin='miter'/%3E%3C/svg%3E">
 </head>
 <body>
 
 <header class="top">
-  <div class="identity">
-    <a class="wordmark" href="./" title="Max Planck Institute for Solid State Research">
-      <span>Max Planck Institute</span>
-      <span>for Solid State Research</span>
-    </a>
-    <span class="id-rule" aria-hidden="true"></span>
-    <div class="product">
-      <span class="product-name">fishy_ir</span>
-      <span class="product-sub">FTIR measurement service · Thermo Fisher OMNIC</span>
-    </div>
-  </div>
-  <button id="btn-settings" class="hbtn" title="Instrument, service and API settings">
+  <a class="identity" href="./" title="Overview">
+    <span class="product-name">FTIR measurement service</span>
+    <span class="product-sub" id="hdr-instrument">Thermo Fisher · Nicolet Summit X</span>
+  </a>
+  <button id="btn-settings" class="hbtn" title="Instrument, connection, defaults and API">
     <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 5h14v2H3zM3 9h14v2H3zM3 13h14v2H3z"/></svg>
     Settings
   </button>
@@ -36,9 +29,8 @@
       <span class="hero-v" id="hs-state">Connecting…</span>
       <p class="hero-sub" id="hs-sub">Waiting for the fishy_ir service.</p>
       <ol class="phases mini" id="hs-phases" hidden>
-        <li data-phase="connecting"><span>Connecting</span></li>
         <li data-phase="collecting"><span>Collecting</span></li>
-        <li data-phase="processing"><span>Processing</span></li>
+        <li data-phase="decoding"><span>Decoding</span></li>
         <li data-phase="pushing"><span>Pushing</span></li>
       </ol>
       <div class="hero-actions">
@@ -53,7 +45,7 @@
         <span class="fact-k">Background</span>
         <span class="fact-v" id="hs-bg">—</span>
         <span class="fact-s" id="hs-bg-sub">—</span>
-        <button id="btn-bg" class="secondary rowbtn" hidden>Measure background now</button>
+        <button id="btn-bg" class="secondary rowbtn" title="Measure a new background now" hidden>Measure now</button>
       </div>
       <div class="fact">
         <span class="fact-k">Instrument</span>
@@ -102,7 +94,7 @@
 
 <footer class="foot">
   <span>Max Planck Institute for Solid State Research · Stuttgart</span>
-  <span><span id="rail-dot" class="dot"></span> <span id="rail-ver">offline</span> · one session, one measurement at a time</span>
+  <span><span id="rail-dot" class="dot"></span> <span id="rail-ver">offline</span></span>
 </footer>
 
 <!-- =================================================== SLIDE-IN PANEL -->
@@ -138,15 +130,19 @@
           <input id="f-res" type="number" value="4" step="any" min="0.25" max="64">
         </label>
         <label><span class="lt">Start <em>cm⁻¹</em></span>
-          <input id="f-start" type="number" value="400" min="1" max="20000">
+          <input id="f-start" type="number" value="4000" min="1" max="20000">
         </label>
         <label><span class="lt">End <em>cm⁻¹</em></span>
-          <input id="f-end" type="number" value="4000" min="1" max="20000">
+          <input id="f-end" type="number" value="600" min="1" max="20000">
         </label>
         <label class="span2"><span class="lt">Detector</span>
-          <select id="f-det">
-            <option value="TGSA" selected>TGSA</option><option>TGSB</option><option>TGSC</option>
-            <option>TGSD</option><option>MCTA</option><option>PBS</option><option>GE</option>
+          <select id="f-det" data-detectors><option selected>TGSA</option></select>
+        </label>
+        <label class="span2" id="f-bgmode-l"><span class="lt">Background <em>for this sample</em></span>
+          <select id="f-bgmode">
+            <option value="">Service default</option>
+            <option value="None">Use the stored background</option>
+            <option value="BeforeCollect">Collect a fresh one first</option>
           </select>
         </label>
       </div>
@@ -161,6 +157,7 @@ operator: TT
 lot: 2026-114"></textarea>
       <p class="msg" id="f-meta-msg"></p>
 
+      <div id="f-output">
       <h3>Output <span class="tag">optional</span></h3>
       <div class="form-grid g4">
         <label class="span4"><span class="lt">Save to <em>file path on the instrument PC</em></span>
@@ -180,13 +177,16 @@ lot: 2026-114"></textarea>
 X-Project: solid-state-ftir"></textarea>
         </label>
       </div>
-      <p class="msg" id="f-push-msg"></p>
+      <div class="row-msg">
+        <p class="msg" id="f-push-msg"></p>
+        <button id="f-push-test" class="secondary rowbtn" hidden title="POST a stub payload to this job's saved endpoint">Send test</button>
+      </div>
+      </div>
 
       <div class="note" id="f-note">
-        <b>Needs a service update.</b> Metadata and output settings are stored with the job (inside its
-        <code>notes</code>) so nothing is lost, but the current service does not yet save to a custom path or call a
-        custom endpoint — the required API additions are listed in <code>BACKEND_REQUESTS.md</code> of the handoff.
-        Header values are readable by anyone with API access to the job list.
+        <b>Output never fails a measurement.</b> Finished files are always copied to
+        <code>measurements\&lt;id&gt;-&lt;name&gt;\</code> on the instrument PC; the path and endpoint above are
+        extras on top. Header values are sent verbatim and shown as <code>***</code> afterwards.
       </div>
 
       <div class="panel-foot">
@@ -210,9 +210,8 @@ X-Project: solid-state-ftir"></textarea>
         <button id="lv-result" class="primary" hidden>Open result</button>
       </div>
       <ol class="phases" id="lv-phases">
-        <li data-phase="connecting"><span>Connecting</span></li>
         <li data-phase="collecting"><span>Collecting</span></li>
-        <li data-phase="processing"><span>Processing</span></li>
+        <li data-phase="decoding"><span>Decoding</span></li>
         <li data-phase="pushing"><span>Pushing</span></li>
       </ol>
       <dl class="kv">
@@ -269,7 +268,7 @@ X-Project: solid-state-ftir"></textarea>
     <section data-pv="settings" hidden>
       <div class="seg compact" role="tablist" aria-label="Settings">
         <label><input type="radio" name="st-tab" value="instrument" checked><span>Instrument</span></label>
-        <label><input type="radio" name="st-tab" value="service"><span>Service</span></label>
+        <label><input type="radio" name="st-tab" value="service"><span>Connection &amp; defaults</span></label>
         <label><input type="radio" name="st-tab" value="api"><span>API</span></label>
       </div>
 
@@ -279,18 +278,15 @@ X-Project: solid-state-ftir"></textarea>
           <button id="btn-st-refresh" class="tertiary">Refresh</button>
         </div>
         <dl class="kv">
-          <dt>Ready-state</dt><dd id="st-ready">probing…</dd>
+          <dt>Engine</dt><dd id="st-ready">probing…</dd>
+          <dt>Phase</dt><dd id="st-session">—</dd>
           <dt>Instrument time</dt><dd id="st-time">—</dd>
-          <dt>Session</dt><dd id="st-session">—</dd>
           <dt>Background rule</dt><dd id="st-bgrule">—</dd>
         </dl>
         <h3>Engine settings <span class="tag">read-only</span></h3>
         <div class="inline-form">
           <label><span class="lt">Detector</span>
-            <select id="opt-det">
-              <option selected>TGSA</option><option>TGSB</option><option>TGSC</option>
-              <option>TGSD</option><option>MCTA</option><option>PBS</option><option>GE</option>
-            </select>
+            <select id="opt-det" data-detectors><option selected>TGSA</option></select>
           </label>
           <button id="btn-opt" class="secondary">Optimal velocity</button>
         </div>
@@ -307,20 +303,68 @@ X-Project: solid-state-ftir"></textarea>
       </div>
 
       <div data-st="service" hidden>
-        <h3 class="flush">Service</h3>
+        <h3 class="flush">Connection</h3>
         <dl class="kv">
-          <dt>Version</dt><dd id="sv-ver">—</dd>
-          <dt>Uptime</dt><dd id="sv-uptime">—</dd>
+          <dt>Service</dt><dd id="sv-ver">—</dd>
+          <dt>Engine</dt><dd id="sv-engine">—</dd>
+          <dt>Last engine error</dt><dd id="sv-failure">—</dd>
           <dt>Token</dt><dd id="sv-token">—</dd>
-          <dt>Results dir</dt><dd id="sv-dir">—</dd>
-          <dt>Default push</dt><dd>configured in the service config (<code>push.url</code>)</dd>
-          <dt>API base</dt><dd id="sv-base">same origin</dd>
         </dl>
+        <div class="form-grid g4 cfg">
+          <label class="span3"><span class="lt">Service address <em>empty = the server this page came from</em></span>
+            <input id="cfg-base" type="url" class="mono-in" placeholder="http://localhost:8385" spellcheck="false" autocomplete="off">
+          </label>
+          <div class="cfg-btn"><button id="cfg-base-apply" class="secondary">Connect</button></div>
+        </div>
         <div class="actions">
-          <button id="btn-push-test" class="secondary">Test push</button>
-          <button id="btn-token" class="tertiary">Set token…</button>
+          <button id="btn-token" class="secondary">Set token…</button>
+          <button id="btn-token-clear" class="tertiary">Forget token</button>
+          <button id="btn-push-test" class="tertiary">Test the service's default push</button>
         </div>
         <p id="push-msg" class="msg"></p>
+
+        <h3>Header</h3>
+        <div class="form-grid g4">
+          <label class="span3"><span class="lt">Instrument name <em>shown under the title</em></span>
+            <input id="cfg-inst" type="text" placeholder="Thermo Fisher · Nicolet Summit X" spellcheck="false" autocomplete="off">
+          </label>
+        </div>
+
+        <h3>Defaults for new measurements <span class="tag">this browser</span></h3>
+        <div class="form-grid g4" id="cfg-defaults">
+          <label><span class="lt">Scans</span><input id="d-scans" type="number" min="1" max="2000" placeholder="10"></label>
+          <label><span class="lt">Resolution <em>cm⁻¹</em></span><input id="d-res" type="number" step="any" min="0.25" max="64" placeholder="4"></label>
+          <label><span class="lt">Start <em>cm⁻¹</em></span><input id="d-start" type="number" min="1" max="20000" placeholder="4000"></label>
+          <label><span class="lt">End <em>cm⁻¹</em></span><input id="d-end" type="number" min="1" max="20000" placeholder="600"></label>
+          <label class="span2"><span class="lt">Detector</span><select id="d-det" data-detectors><option selected>TGSA</option></select></label>
+          <label class="span2"><span class="lt">Background</span>
+            <select id="d-bgmode">
+              <option value="">Service default</option>
+              <option value="None">Use the stored background</option>
+              <option value="BeforeCollect">Collect a fresh one first</option>
+            </select>
+          </label>
+          <label class="span4"><span class="lt">Save to <em>default path</em></span>
+            <input id="d-path" type="text" class="mono-in" placeholder="C:\shared\ftir" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="span1"><span class="lt">Method</span>
+            <select id="d-push-method"><option>POST</option><option>PUT</option><option>PATCH</option></select>
+          </label>
+          <label class="span3"><span class="lt">API endpoint <em>default · headers are never stored</em></span>
+            <input id="d-push-url" type="url" class="mono-in" placeholder="https://eln.example.org/api/v1/ftir" spellcheck="false" autocomplete="off">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="cfg-save" class="primary">Save settings</button>
+          <button id="cfg-reset" class="tertiary">Reset to built-in defaults</button>
+        </div>
+        <p id="cfg-msg" class="msg"></p>
+
+        <div class="note">
+          <b>Service configuration</b> (<code>config/fishy_ir.json</code>: host, token, default push, background
+          limit…) is not editable from the browser yet — change the file and restart the service. The endpoints
+          needed to edit it here are listed in <code>BACKEND_REQUESTS.md</code> §7.
+        </div>
       </div>
 
       <div data-st="api" hidden>

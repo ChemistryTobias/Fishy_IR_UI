@@ -173,23 +173,25 @@ collect uses it automatically.)
 
 ## 7. UI structure (what you're improving)
 
-Five views (`#nav` tabs): **queue / live / results / settings / api** + a
-**hero** (header, background banner, "Measure background now") above them
-and a sticky **footer** below.
+One desktop page plus a slide-in panel (no tabs):
 
-* `ui/index.html` — DOM skeleton
-* `ui/style.css`  — all styles; design tokens = CSS vars at the top
-  (`--bg --panel --panel2 --line --text --muted --accent --accent2 --ok --warn --err --mono`)
-* `ui/app.js`     — client; ALL fetches go through `API.req(path[, opts])`
-  (token, JSON, error toast). API base = `API.base`
-  (`?base=http://host:port` overrides, handy for local dev).
+* **Main page:** status block (Running / Stopping / Idle / Error / Offline,
+  background with "Measure now", instrument, queue size) · **queue** (running
+  and staged jobs only) · "+ New measurement" · **Recent activity** bar ·
+  footer (sticky).
+* **Panel** (`#panel`, *Back* / Esc): new or staged job form (`f-*`) · follow
+  the running job (`lv-*`) · recent activity (`rc-*`) · result + spectrum
+  (`rd-*`, `rd-canvas`) · settings (`st-*` instrument, `cfg-*` / `d-*`
+  connection & defaults, API tab).
 
-Key ids: `status-line` · `bg-banner / btn-bg` · `q-form / btn-add /
-btn-addstart / q-table` · `lv-*` (live banner) · `res-table / res-detail /
-rd-canvas` (spectrum canvas) · `st-*` (settings) · `toasts` · `tk-*` (token
-prompt).
+* `ui/index.html`: DOM skeleton
+* `ui/style.css`: all styles; design tokens are CSS vars at the top (MPG palette)
+* `ui/app.js`: client. All fetches go through `API.req(path[, opts])`
+  (token, JSON, errors); the queue endpoints go through `listJobs()` /
+  `enqueue()` / `startJob()`. API base = `API.base` (`?base=…`, or
+  *Settings → Connection & defaults*).
 
-**Hard requirements (keep):** no framework, no CDN, no build step — the UI
+**Hard requirements (keep):** no framework, no CDN, no build step. The UI
 must work on an air-gapped Windows PC from plain files.
 
 ## 8. Open items (from the instrument-UI session, 2026-10-27)

@@ -44,7 +44,7 @@
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }
 body {
-  margin: 0; min-width: 1200px;
+  margin: 0; min-width: 1200px; min-height: 100vh;
   background: var(--color-bg); color: var(--color-text);
   font: 400 15px/1.55 var(--font-body); letter-spacing: .01em;
   display: flex; flex-direction: column;
@@ -74,16 +74,13 @@ header.top::after {
           mask-image: linear-gradient(90deg, transparent, #000 70%);
   pointer-events: none;
 }
-.identity { position: relative; z-index: 1; display: flex; align-items: center; gap: 22px; }
-.wordmark {
-  display: flex; flex-direction: column; color: #fff; text-decoration: none;
-  font: 700 13px/1.25 var(--font-display); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap;
+.identity {
+  position: relative; z-index: 1; display: flex; flex-direction: column; gap: 4px;
+  color: #fff; text-decoration: none;
 }
-.wordmark:hover { color: #fff; }
-.id-rule { width: 1px; align-self: stretch; background: rgba(255,255,255,.45); }
-.product { display: flex; flex-direction: column; }
-.product-name { font: 700 22px/1.1 var(--font-display); letter-spacing: .04em; }
-.product-sub { font-weight: 300; font-size: 13px; letter-spacing: .03em; opacity: .9; }
+.identity:hover { color: #fff; }
+.product-name { font: 700 22px/1.15 var(--font-display); letter-spacing: .04em; }
+.product-sub { font-weight: 300; font-size: 14px; letter-spacing: .03em; opacity: .92; }
 .hbtn {
   position: relative; z-index: 1;
   border: 1px solid rgba(255,255,255,.7); color: #fff; background: transparent; padding: 10px 18px;
@@ -152,7 +149,6 @@ p.hint { margin: 8px 0 0; }
 .fact-v.is-err { color: var(--color-danger); }
 .fact-s { font-size: 12.5px; color: var(--color-text-secondary); }
 .fact .rowbtn { margin-top: 10px; align-self: flex-start; }
-#btn-bg { width: 132px; text-align: center; }   /* two lines, not a wide one-liner */
 #hf-bg.warn { background: var(--color-warn-tint); box-shadow: inset 0 3px 0 var(--color-warn); }
 .hero-warn {
   grid-column: 1 / -1; padding: 12px 30px; border-top: 1px solid var(--color-line);
@@ -191,7 +187,7 @@ p.hint { margin: 8px 0 0; }
 /* ================================================================ forms */
 .form-grid { display: grid; gap: 16px 18px; }
 .form-grid.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.span2 { grid-column: span 2; } .span3 { grid-column: span 3; } .span4 { grid-column: 1 / -1; }
+.span1 { grid-column: span 1; } .span2 { grid-column: span 2; } .span3 { grid-column: span 3; } .span4 { grid-column: 1 / -1; }
 label {
   display: flex; flex-direction: column; gap: 6px;
   font: 700 11.5px/1.2 var(--font-display); letter-spacing: .08em; text-transform: uppercase;
@@ -243,6 +239,13 @@ label.check input { width: 18px; height: 18px; margin: 0; accent-color: var(--co
 .seg.compact span { padding: 9px 10px; font-size: 11.5px; }
 
 .inline-form { display: flex; gap: 12px; align-items: flex-end; }
+.form-grid.cfg { margin-top: 22px; }
+.cfg-btn { display: flex; align-items: flex-end; }
+.cfg-btn button { width: 100%; }
+.row-msg { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.row-msg .msg { margin: 0; }
+.row-msg .msg:empty { display: block; }
+pre.xml { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; }
 .inline-form label { width: 180px; }
 
 .note {
